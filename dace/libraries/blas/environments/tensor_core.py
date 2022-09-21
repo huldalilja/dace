@@ -6,19 +6,19 @@ import dace.library
 class TensorCore:
 
     cmake_minimum_version = None
-    cmake_packages = []
+    cmake_packages = ["CUDA"]
     cmake_variables = {}
     cmake_includes = []
-    cmake_libraries = ["cublas"]
+    cmake_libraries = []
     cmake_compile_flags = []
     cmake_link_flags = []
     cmake_files = []
 
-    headers = {'frame': ["../include/dace_cublas.h"], 'cuda': ["../include/dace_cublas.h"]}
-    state_fields = ["dace::blas::CublasHandle cublas_handle;"]
+    headers = {'frame': ["../include/dace_tensor_core.h"], 'tensor_core': ["../include/dace_tensor_core.h"]}
     init_code = ""
     finalize_code = ""
     dependencies = []
+    state_fields = []
 
     @staticmethod
     def handle_setup_code(node):
@@ -32,8 +32,6 @@ class TensorCore:
                 raise ValueError("Invalid GPU identifier: {}".format(location))
 
         code = """\
-const int __dace_cuda_device = {location};
-cublasHandle_t &__dace_cublas_handle = __state->cublas_handle.Get(__dace_cuda_device);
-cublasSetStream(__dace_cublas_handle, __dace_current_stream);\n"""
+const int __dace_cuda_device = {location};\n"""
 
         return code.format(location=location)

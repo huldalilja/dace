@@ -1,5 +1,6 @@
 # Copyright 2019-2021 ETH Zurich and the DaCe authors. All rights reserved.
 from copy import deepcopy as dc
+from sched import scheduler
 from typing import Any, Dict, Optional
 from dace import dtypes, memlet as mm, properties, data as dt
 from dace.symbolic import symstr
@@ -400,6 +401,7 @@ class ExpandGemmCuBLAS(ExpandTransformation):
 
 @dace.library.expansion
 class ExpandGemmTensorCore(ExpandTransformation):
+    # TODO hhannesdo, need to check somewhere if device has Tensor Cores
 
     environments = [environments.tensor_core.TensorCore]
 
@@ -430,107 +432,118 @@ class ExpandGemmTensorCore(ExpandTransformation):
         needs_copy = any(desc.storage not in (dace.StorageType.GPU_Global, dace.StorageType.CPU_Pinned)
                          for desc in (adesc, bdesc, cdesc))
 
-        dtype = adesc.dtype.base_type
-        func = '%sgemm' % to_blastype(dtype.type)
-        if dtype == dace.float16:
-            cdtype = '__half'
-            factort = 'Half'
-        elif dtype == dace.float32:
-            cdtype = 'float'
-            factort = 'Float'
-        elif dtype == dace.float64:
-            cdtype = 'double'
-            factort = 'Double'
-        elif dtype == dace.complex64:
-            cdtype = 'cuComplex'
-            factort = 'Complex64'
-        elif dtype == dace.complex128:
-            cdtype = 'cuDoubleComplex'
-            factort = 'Complex128'
-        else:
-            raise ValueError("Unsupported type: " + str(dtype))
+        adtype = adesc.dtype.base_type
+        bdtype = adesc.dtype.base_type
+        cdtype = adesc.dtype.base_type
+        if adtype != dace.float16 or bdtype != dace.float16 or (cdtype != dace.float16 and cdtype != dace.float32):
+            # TODO convert, if possible
+            raise ValueError("Unsupported type: " + str(adtype))
 
-        call_prefix = environments.cublas.cuBLAS.handle_setup_code(node)
-        call_suffix = ''
+        call_prefix = environments.tensor_core.TensorCore.handle_setup_code(node)
 
-        # Handle alpha / beta
-        constants = {
-            1.0: f"__state->cublas_handle.Constants(__dace_cuda_device).{factort}Pone()",
-            #-1.0: f"__state->cublas_handle.Constants(__dace_cuda_device).{factort}Mone()",
-            0.0: f"__state->cublas_handle.Constants(__dace_cuda_device).{factort}Zero()",
-        }
-        if node.alpha not in constants or node.beta not in constants:
-            # Deal with complex input constants
-            if isinstance(node.alpha, complex):
-                alpha = f'{dtype.ctype}({node.alpha.real}, {node.alpha.imag})'
-            else:
-                alpha = f'{dtype.ctype}({node.alpha})'
-            if isinstance(node.beta, complex):
-                beta = f'{dtype.ctype}({node.beta.real}, {node.beta.imag})'
-            else:
-                beta = f'{dtype.ctype}({node.beta})'
-
-            # Set pointer mode to host
-            call_prefix += f'''cublasSetPointerMode(__dace_cublas_handle, CUBLAS_POINTER_MODE_HOST);
-            {dtype.ctype} alpha = {alpha};
-            {dtype.ctype} beta = {beta};
-            '''
-            call_suffix += '''cublasSetPointerMode(__dace_cublas_handle, CUBLAS_POINTER_MODE_DEVICE);'''
-            alpha = f'({cdtype} *)&alpha'
-            beta = f'({cdtype} *)&beta'
-        else:
-            alpha = constants[node.alpha]
-            beta = constants[node.beta]
+        alpha = node.alpha
+        beta = node.beta
 
         # Set up options for code formatting
+        dtype = adesc.dtype.base_type
+        func = '%sgemm' % to_blastype(dtype.type)
         opt = _get_codegen_gemm_opts(node, state, sdfg, adesc, bdesc, cdesc, alpha, beta, cdtype, func)
         opt['arr_prefix'] = arr_prefix = ''
+        arr_suffix = ''
         if needs_copy:
             opt['arr_prefix'] = arr_prefix = '_conn'
+            arr_suffix = '_gpu'
+        
+        # TODO hhannesdo, should constants be elsewhere?
+        opt['WMMA_M'] = 16
+        opt['WMMA_N'] = 16
+        opt['WMMA_K'] = 16
 
-        # Matrix multiplication
-        if (node.compute_type is None and node.accumulator_type is None and node.algorithm is None):
-            call = '''cublas{func}(__dace_cublas_handle,
-                CUBLAS_OP_{ta}, CUBLAS_OP_{tb},
-                {M}, {N}, {K},
-                {alpha},
-                ({dtype}*){arr_prefix}{x}, {lda},
-                ({dtype}*){arr_prefix}{y}, {ldb},
-                {beta},
-                ({dtype}*){arr_prefix}_c, {ldc});'''.format_map(opt)
-        else:
-            if node.compute_type is not None:
-                acctype = node.compute_type
-            elif node.accumulator_type is not None:
-                acc_dtype: dtypes.typeclass = node.accumulator_type
-                acctype = f'CUBLAS_COMPUTE_{to_cublas_computetype(acc_dtype)}'
-            else:
-                acctype = f'CUBLAS_COMPUTE_{to_cublas_computetype(dtype)}'
+        wmma_kernel = '''int lda = {M};
+        int ldb = {K};
+        int ldc = {M};
+        int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
+        int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+        wmma::fragment<wmma::matrix_a, {WMMA_M}, {WMMA_N}, {WMMA_K}, half, wmma::col_major> a_frag;
+        wmma::fragment<wmma::matrix_b, {WMMA_M}, {WMMA_N}, {WMMA_K}, half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::accumulator, {WMMA_M}, {WMMA_N}, {WMMA_K}, float> acc_frag;
+        wmma::fragment<wmma::accumulator, {WMMA_M}, {WMMA_N}, {WMMA_K}, float> c_frag;
+        wmma::fill_fragment(acc_frag, 0.0f);
+        for (int i = 0; i < K; i += {WMMA_K}) {{
+            int aRow = warpM * {WMMA_M};
+            int aCol = i;
+            int bRow = i;
+            int bCol = warpN * {WMMA_N};
+            if (aRow < M && aCol < K && bRow < K && bCol < N) {{
+                // Load the inputs
+                wmma::load_matrix_sync(a_frag, {arr_prefix}{x} + aRow + aCol * lda, lda);
+                wmma::load_matrix_sync(b_frag, {arr_prefix}{y} + bRow + bCol * ldb, ldb);
+        
+                // Perform the matrix multiplication
+                wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            }}
+        }}
+        int cRow = warpM * {WMMA_M};
+        int cCol = warpN * {WMMA_N};
+        if (cRow < M && cCol < N) {{
+            wmma::load_matrix_sync(c_frag, {arr_prefix}_c + cRow + cCol * ldc, ldc, wmma::mem_col_major);
 
-            algorithm = 'CUBLAS_GEMM_DEFAULT_TENSOR_OP'
-            if node.algorithm is not None:
-                algorithm = node.algorithm
 
-            call = f'''
-            cublasGemmEx(__dace_cublas_handle,
-                CUBLAS_OP_{opt['ta']}, CUBLAS_OP_{opt['tb']},
-                {opt['M']}, {opt['N']}, {opt['K']},
-                {alpha},
-                {arr_prefix}{opt['x']},
-                {dtype_to_cudadatatype(opt['xdtype'])},
-                {opt['lda']},
-                {arr_prefix}{opt['y']},
-                {dtype_to_cudadatatype(opt['ydtype'])},
-                {opt['ldb']},
-                {beta},
-                {arr_prefix}_c,
-                {dtype_to_cudadatatype(opt['cdtype'])},
-                {opt['ldc']},
-                {acctype},
-                {algorithm});
-            '''
+            for(int i=0; i < c_frag.num_elements; i++) {{
+                c_frag.x[i] = {alpha} * acc_frag.x[i] + {beta} * c_frag.x[i];
+            }}
 
-        code = (call_prefix + call + call_suffix)
+            // Store the output
+            wmma::store_matrix_sync({arr_prefix}_c + cRow + cCol * ldc, c_frag, ldc, wmma::mem_col_major);
+        }}'''.format_map(opt)
+
+        code = call_prefix + wmma_kernel
+
+        nsdfg = dace.SDFG('nested_gemm')
+        global_code = '''
+    #ifdef __CUDACC__
+    #include <mma.h>
+    using namespace nvcuda;
+    #endif
+'''
+        # We append the global code only to the CUDA-generated file. Every
+        # file generated by each code generators creates an entry in the SDFG
+        # global code dictionary. The `None` key refers to global code that will
+        # be added to every generated file.
+        if ('cuda' not in sdfg.global_code or 'mma.h' not in sdfg.global_code['cuda'].code):
+            nsdfg.append_global_code(global_code, 'cuda')
+        
+        nstate = nsdfg.add_state()
+        a = nstate.add_read('_a')
+        b = nstate.add_read('_b')
+        c = nstate.add_write('_c')
+
+        map_entry, map_exit = nstate.add_map(
+            node.name,
+            dict(i='0:{M}:{WMMA_M}'.format_map(opt), j='0:{N}:{WMMA_N}'.format_map(opt)),
+            dace.dtypes.ScheduleType.GPU_Device
+        )
+
+        map_entry.add_in_connector('IN_A')
+        map_entry.add_in_connector('IN_B')
+        map_entry.add_out_connector('OUT_A')
+        map_entry.add_out_connector('OUT_B')
+        map_exit.add_in_connector('IN_C')
+        map_exit.add_out_connector('OUT_C')
+
+        warp_map_entry, warp_map_exit = nstate.add_map(
+            'warp_map',
+            dict(_='0:32'),
+            dace.dtypes.ScheduleType.GPU_ThreadBlock
+        )
+
+        warp_map_entry.add_in_connector('IN' + arr_prefix + '_a')
+        warp_map_entry.add_in_connector('IN' + arr_prefix + '_b')
+        warp_map_entry.add_out_connector('OUT' + arr_prefix + '_a')
+        warp_map_entry.add_out_connector('OUT' + arr_prefix + '_b')
+        warp_map_exit.add_in_connector('IN' + arr_prefix + '_c')
+        warp_map_exit.add_out_connector('OUT' + arr_prefix + '_c')
+
         tasklet = dace.sdfg.nodes.Tasklet(
             node.name,
             node.in_connectors,
@@ -539,9 +552,23 @@ class ExpandGemmTensorCore(ExpandTransformation):
             language=dace.dtypes.Language.CPP,
         )
 
-        # If buffers are not on the GPU, copy them
-        if needs_copy:
-            nsdfg = dace.SDFG('nested_gemm')
+        # Add connectors between GPU map and warp map
+        nstate.add_edge(map_entry, 'OUT_A', warp_map_entry, 'IN' + arr_prefix + '_a', dace.Memlet(data="_a" + arr_suffix, subset='i:i+{WMMA_M}, 0:{K}'.format_map(opt)))
+        nstate.add_edge(map_entry, 'OUT_B', warp_map_entry, 'IN' + arr_prefix + '_b', dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{WMMA_N}'.format_map(opt)))
+        nstate.add_edge(warp_map_exit, 'OUT' + arr_prefix + '_c', map_exit, 'IN_C', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+
+        # Add connectors between warp (Block) map and tasklet
+        nstate.add_edge(warp_map_entry, 'OUT' + arr_prefix + '_a', tasklet, arr_prefix + '_a', dace.Memlet(data="_a" + arr_suffix, subset='i:i+{WMMA_M}, 0:{K}'.format_map(opt)))
+        nstate.add_edge(warp_map_entry, 'OUT' + arr_prefix + '_b', tasklet, arr_prefix + '_b', dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{WMMA_N}'.format_map(opt)))
+        nstate.add_edge(tasklet, arr_prefix + '_c', warp_map_exit, 'IN' + arr_prefix + '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+        
+        if not needs_copy:
+            # Adding connectors from GPU map directly to a,b and c
+            nstate.add_edge(a, None, map_entry, 'IN_A', dace.Memlet.from_array('_a', adesc))
+            nstate.add_edge(b, None, map_entry, 'IN_B', dace.Memlet.from_array('_b', adesc))
+            nstate.add_edge(map_exit, 'OUT_C', c, None, dace.Memlet.from_array('_c', adesc))
+        else:
+            # If buffers are not on the GPU, copy them
             for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
@@ -554,38 +581,33 @@ class ExpandGemmTensorCore(ExpandTransformation):
                 dcopy_gpu.transient = True
                 dcopy_gpu.storage = dace.StorageType.GPU_Global
                 nsdfg.add_datadesc(name + '_gpu', dcopy_gpu)
-            nstate = nsdfg.add_state()
-            a = nstate.add_read('_a')
             ga = nstate.add_access('_a_gpu')
-            b = nstate.add_read('_b')
             gb = nstate.add_access('_b_gpu')
-            c = nstate.add_write('_c')
             gc = nstate.add_access('_c_gpu')
 
             # Reset code and connectors
             tasklet.in_connectors = {"_conn" + k: None for k in tasklet.in_connectors}
             tasklet.out_connectors = {"_conn" + k: None for k in tasklet.out_connectors}
 
-            nstate.add_node(tasklet)
             nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
             nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
 
-            nstate.add_edge(ga, None, tasklet, '_conn_a', dace.Memlet.from_array('_a_gpu', adesc))
-            nstate.add_edge(gb, None, tasklet, '_conn_b', dace.Memlet.from_array('_b_gpu', bdesc))
-            nstate.add_edge(tasklet, '_conn_c', gc, None, dace.Memlet.from_array('_c_gpu', cdesc))
+            nstate.add_edge(ga, None, map_entry, 'IN_A', dace.Memlet.from_array('_a_gpu', adesc))
+            nstate.add_edge(gb, None, map_entry, 'IN_B', dace.Memlet.from_array('_b_gpu', bdesc))
+            nstate.add_edge(map_exit, 'OUT_C', gc, None, dace.Memlet.from_array('_c_gpu', cdesc))
+            
             nstate.add_nedge(gc, c, dace.Memlet.from_array('_c', cdesc))
 
             if node.beta != 0.0:
                 rc = nstate.add_read('_c')
                 rgc = nstate.add_access('_c_gpu')
-                tasklet.add_in_connector('_conn_cin')
+                map_entry.add_in_connector('_conn_cin')
                 nstate.add_nedge(rc, rgc, dace.Memlet('_c'))
                 nstate.add_edge(rgc, None, tasklet, '_conn_cin', dace.Memlet('_c_gpu'))
+                # TODO fix, add connection through maps
+            # End of copy to GPU
 
-            return nsdfg
-        # End of copy to GPU
-
-        return tasklet
+        return nsdfg
 
 
 @dace.library.expansion
