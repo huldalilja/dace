@@ -434,8 +434,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
                          for desc in (adesc, bdesc, cdesc))
 
         adtype = adesc.dtype.base_type
-        bdtype = adesc.dtype.base_type
-        cdtype = adesc.dtype.base_type
+        bdtype = bdesc.dtype.base_type
+        cdtype = cdesc.dtype.base_type
         if adtype != dace.float16 or bdtype != dace.float16 or (cdtype != dace.float16 and cdtype != dace.float32):
             # TODO convert, if possible
             raise ValueError("Unsupported type: " + str(adtype))
@@ -454,33 +454,34 @@ class ExpandGemmTensorCore(ExpandTransformation):
             arr_suffix = '_gpu'
         
         opt['final_comp_and_storing'] = '''
-            wmma::load_matrix_sync(c_frag, {arr_prefix}_c + cRow + cCol * ldc, ldc, wmma::mem_col_major);
+            wmma::load_matrix_sync(c_frag, {arr_prefix}_cin, ldc, wmma::mem_col_major);
             
             for(int i=0; i < c_frag.num_elements; i++) {{
                 c_frag.x[i] = {alpha} * acc_frag.x[i] + {beta} * c_frag.x[i];
             }}
 
             // Store the output
-            wmma::store_matrix_sync({arr_prefix}_c + cRow + cCol * ldc, c_frag, ldc, wmma::mem_col_major);
+            wmma::store_matrix_sync({arr_prefix}_c, c_frag, ldc, wmma::mem_col_major);
         '''.format_map(opt)
 
         if(alpha == 1 and beta == 0):
             opt['final_comp_and_storing'] = '''
                 // Store the output
-                wmma::store_matrix_sync({arr_prefix}_c + cRow + cCol * ldc, acc_frag, ldc, wmma::mem_col_major);
+                wmma::store_matrix_sync({arr_prefix}_c, acc_frag, ldc, wmma::mem_col_major);
             '''.format_map(opt)
 
         opt['WMMA_M'] = 16
         opt['WMMA_N'] = 16
-        opt['WMMA_K'] = 16 
+        opt['WMMA_K'] = 16
+        opt['WARP_SIZE'] = 32
 
         wmma_kernel = '''
         const int WMMA_M = {WMMA_M};
         const int WMMA_N = {WMMA_N};
         const int WMMA_K = {WMMA_K};
-        int lda = {M};
-        int ldb = {K};
-        int ldc = {M};
+        int lda = N;
+        int ldb = K;
+        int ldc = K;
         int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
         int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
         wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
@@ -488,15 +489,15 @@ class ExpandGemmTensorCore(ExpandTransformation):
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
         wmma::fill_fragment(acc_frag, 0.0f);
-        for (int i = 0; i < K; i += WMMA_K) {{
+        for (int i = 0; i < {K}; i += WMMA_K) {{
             int aRow = warpM * WMMA_M;
             int aCol = i;
             int bRow = i;
             int bCol = warpN * WMMA_N;
-            if (aRow < M && aCol < K && bRow < K && bCol < N) {{
+            if (aRow < {M} && aCol < {K} && bRow < {K} && bCol < {N}) {{
                 // Load the inputs
-                wmma::load_matrix_sync(a_frag, {arr_prefix}{x} + aRow + aCol * lda, lda);
-                wmma::load_matrix_sync(b_frag, {arr_prefix}{y} + bRow + bCol * ldb, ldb);
+                wmma::load_matrix_sync(a_frag, {arr_prefix}{x} + aCol * lda, lda);
+                wmma::load_matrix_sync(b_frag, {arr_prefix}{y} + bRow, ldb);
         
                 // Perform the matrix multiplication
                 wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
@@ -504,7 +505,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         }}
         int cRow = warpM * WMMA_M;
         int cCol = warpN * WMMA_N;
-        if (cRow < M && cCol < N) {{
+        if (cRow < {M} && cCol < {N}) {{
             {final_comp_and_storing}
 
         }}'''.format_map(opt)
@@ -542,7 +543,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
 
         warp_map_entry, warp_map_exit = nstate.add_map(
             'warp_map',
-            dict(_='0:32'),
+            dict(_='0:{WARP_SIZE}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_ThreadBlock
         )
 
