@@ -453,23 +453,31 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['arr_prefix'] = arr_prefix = '_conn'
             arr_suffix = '_gpu'
         
-        opt['final_comp_and_storing'] = '''
-            wmma::load_matrix_sync(c_frag, {arr_prefix}_cin, ldc, wmma::mem_col_major);
-            
-            for(int i=0; i < c_frag.num_elements; i++) {{
-                c_frag.x[i] = {alpha} * acc_frag.x[i] + {beta} * c_frag.x[i];
-            }}
+        opt['final_comp_and_storing'] = ""
+        if(beta == 0):
+            if(alpha != 1):
+                opt['final_comp_and_storing'] = '''
+        for(int l=0; l < acc_frag.num_elements; l++) {{
+            acc_frag.x[l] = {alpha} * acc_frag.x[l];
+        }}'''.format_map(opt)
 
-            // Store the output
-            wmma::store_matrix_sync({arr_prefix}_c, c_frag, ldc, wmma::mem_col_major);
+            opt['final_comp_and_storing'] += '''
+        
+        // Store the output
+        wmma::store_matrix_sync({arr_prefix}_c, acc_frag, N, wmma::mem_row_major);
         '''.format_map(opt)
-
-        if(alpha == 1 and beta == 0):
+        else:
             opt['final_comp_and_storing'] = '''
-                // Store the output
-                wmma::store_matrix_sync({arr_prefix}_c, acc_frag, ldc, wmma::mem_col_major);
-            '''.format_map(opt)
+        wmma::load_matrix_sync(c_frag, {arr_prefix}_cin, N, wmma::mem_row_major);
+        
+        for(int l=0; l < c_frag.num_elements; l++) {{
+            c_frag.x[l] = {alpha} * acc_frag.x[l] + {beta} * c_frag.x[l];
+        }}
 
+        // Store the output
+        wmma::store_matrix_sync({arr_prefix}_c, c_frag, N, wmma::mem_row_major);
+        '''.format_map(opt)
+        
         opt['WMMA_M'] = 16
         opt['WMMA_N'] = 16
         opt['WMMA_K'] = 16
@@ -479,36 +487,22 @@ class ExpandGemmTensorCore(ExpandTransformation):
         const int WMMA_M = {WMMA_M};
         const int WMMA_N = {WMMA_N};
         const int WMMA_K = {WMMA_K};
-        int lda = N;
-        int ldb = K;
-        int ldc = K;
         int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
         int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> a_frag;
-        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> b_frag;
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
         wmma::fill_fragment(acc_frag, 0.0f);
-        for (int i = 0; i < {K}; i += WMMA_K) {{
-            int aRow = warpM * WMMA_M;
-            int aCol = i;
-            int bRow = i;
-            int bCol = warpN * WMMA_N;
-            if (aRow < {M} && aCol < {K} && bRow < {K} && bCol < {N}) {{
-                // Load the inputs
-                wmma::load_matrix_sync(a_frag, {arr_prefix}{x} + aCol * lda, lda);
-                wmma::load_matrix_sync(b_frag, {arr_prefix}{y} + bRow, ldb);
-        
-                // Perform the matrix multiplication
-                wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-            }}
+        for (int k = 0; k < K; k += WMMA_K) {{
+            // Load the inputs
+            wmma::load_matrix_sync(a_frag, {arr_prefix}_a + k, K);
+            wmma::load_matrix_sync(b_frag, {arr_prefix}_b + (N * k), N);
+    
+            // Perform the matrix multiplication
+            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         }}
-        int cRow = warpM * WMMA_M;
-        int cCol = warpN * WMMA_N;
-        if (cRow < {M} && cCol < {N}) {{
-            {final_comp_and_storing}
-
-        }}'''.format_map(opt)
+        {final_comp_and_storing}'''.format_map(opt)
 
         code = wmma_kernel
 
@@ -530,7 +524,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
 
         map_entry, map_exit = nstate.add_map(
             node.name,
-            dict(i='0:{M}:{WMMA_M}'.format_map(opt), j='0:{N}:{WMMA_N}'.format_map(opt)),
+            dict(j='0:{M}:{WMMA_M}'.format_map(opt), i='0:{N}:{WMMA_N}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_Device
         )
 
