@@ -583,24 +583,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
             nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, 'IN' + arr_prefix + '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
             nstate.add_edge(warp_map_entry, 'OUT' + arr_prefix + '_c', tasklet, arr_prefix + '_cin', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
 
-        if not needs_copy:
-            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
-                if isinstance(desc, dt.View):
-                    dcopy = desc.as_array()
-                else:
-                    dcopy = dc(desc)
-                dcopy.lifetime = dtypes.AllocationLifetime.Scope
-                dcopy.transient = True
-                nsdfg.add_datadesc(name, dcopy)
-
-            # Adding connectors from GPU map directly to a,b and c
-            nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
-            nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
-            nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
-
-            if node.beta != 0.0:
-                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
-        else:
+        if needs_copy:
             # If buffers are not on the GPU, copy them
             for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
                 if isinstance(desc, dt.View):
@@ -636,7 +619,25 @@ class ExpandGemmTensorCore(ExpandTransformation):
                 nstate.add_nedge(rc, rgc, dace.Memlet('_c'))
                 nstate.add_edge(rgc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c_gpu', cdesc))
             # End of copy to GPU
+        else:
+            # Arrays already on GPU
+            # TODO hhannesdo, have a look at this
+            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
+                if isinstance(desc, dt.View):
+                    dcopy = desc.as_array()
+                else:
+                    dcopy = dc(desc)
+                dcopy.lifetime = dtypes.AllocationLifetime.Scope
+                dcopy.transient = True
+                nsdfg.add_datadesc(name, dcopy)
 
+            # Adding connectors from GPU map directly to a,b and c
+            nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
+            nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
+            nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
+
+            if node.beta != 0.0:
+                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
         return nsdfg
 
 
