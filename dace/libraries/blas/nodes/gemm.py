@@ -1,6 +1,8 @@
 # Copyright 2019-2021 ETH Zurich and the DaCe authors. All rights reserved.
+from asyncore import write
 from copy import deepcopy as dc
 from sched import scheduler
+from sys import prefix
 from typing import Any, Dict, Optional
 from dace import dtypes, memlet as mm, properties, data as dt
 from dace.libraries.standard.environments.cuda import CUDA as cudaenv
@@ -452,6 +454,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
         if needs_copy:
             opt['arr_prefix'] = arr_prefix = '_conn'
             arr_suffix = '_gpu'
+        else:   
+            arr_suffix = '_gpu'
         
         if opt['swap']:
             opt['M'] = 'M'
@@ -461,6 +465,10 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['ldb'] = tmp
             opt['major_order'] = 'row'
         else:
+            # TODO hhannesdo, haven't tested. Might need to make changes in maps too.
+            opt['lda'] = 'M'
+            opt['ldb'] = 'K'
+            opt['ldc'] = 'M'
             opt['major_order'] = 'col'
         
         opt['final_comp_and_storing'] = ""
@@ -526,9 +534,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
             nsdfg.append_global_code(global_code, 'cuda')
         
         nstate = nsdfg.add_state()
-        a = nstate.add_read('_a')
-        b = nstate.add_read('_b')
-        c = nstate.add_write('_c')
 
         map_entry, map_exit = nstate.add_map(
             node.name,
@@ -564,6 +569,40 @@ class ExpandGemmTensorCore(ExpandTransformation):
             language=dace.dtypes.Language.CPP,
         )
 
+        ###### Creating nested SDFG instead of kernel tasklet 
+        ksdfg = dace.SDFG('kernel_gemm')
+        #nstate.add_nested_sdfg(ksdfg, nstate, node.in_connectors, node.out_connectors, name='kernel_gemm')
+        ksdfg.in_connectors = node.in_connectors
+        ksdfg.out_connectors = node.out_connectors
+        fill_state = ksdfg.add_state('fill_state')
+        wmma_state = ksdfg.add_state('wmma_state')
+        write_state = ksdfg.add_state('write_state')
+        ksdfg.add_loop(fill_state, wmma_state, write_state, 'k', '0', '(k < K)', '(k + 16)', wmma_state)
+        
+        fill_tasklet = fill_state.add_tasklet('fill', None, None, 'wmma::fill_fragment(out, 0.0)', language=dace.dtypes.Language.CPP)
+        fill_tasklet.add_out_connector('out')
+        cfrag = fill_state.add_array('cfrag', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global) # TODO hhannesdo, change storage and possibly other parameters
+        fill_state.add_edge(fill_tasklet, 'out', cfrag, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
+        
+        write_state.add_read('cfrag')
+        c_out = write_state.add_write('_c')
+        write_state.add_edge(cfrag, None, c_out, None, dace.Memlet(data="cfrag", subset='0:16, 0:16'))
+        
+        aslice = wmma_state.add_read('_a')
+        bslice = wmma_state.add_read('_b')
+        atile = wmma_state.add_array('atile', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global) # TODO hhannesdo, change storage and possibly other parameters
+        btile = wmma_state.add_array('btile', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global) # TODO hhannesdo, change storage and possibly other parameters
+        wmma_state.add_edge(aslice, None, atile, None, dace.Memlet(data="aslice", subset='0:16, k:k + 16'))
+        wmma_state.add_edge(bslice, None, btile, None, dace.Memlet(data="bslice", subset='0:k + 16, 0:16'))
+        wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(cfrag, afrag, bfrag)', language=dace.dtypes.Language.CPP)
+        wmma_tasklet.add_in_connector('afrag')
+        wmma_tasklet.add_in_connector('bfrag')
+        wmma_state.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:16, 0:16'))
+        wmma_state.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:16, 0:16'))
+        ctile_out = wmma_state.add_write('ctile')
+        wmma_state.add_edge(wmma_tasklet, 'cfrag', ctile_out, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
+        ############
+
         # Add connectors between GPU map and warp map
         nstate.add_edge(map_entry, 'OUT_a', warp_map_entry, 'IN' + arr_prefix + '_a', dace.Memlet(data="_a" + arr_suffix, subset='i:i+{WMMA_M}, 0:{K}'.format_map(opt)))
         nstate.add_edge(map_entry, 'OUT_b', warp_map_entry, 'IN' + arr_prefix + '_b', dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{WMMA_N}'.format_map(opt)))
@@ -597,6 +636,9 @@ class ExpandGemmTensorCore(ExpandTransformation):
                 dcopy_gpu.transient = True
                 dcopy_gpu.storage = dace.StorageType.GPU_Global
                 nsdfg.add_datadesc(name + '_gpu', dcopy_gpu)
+            a = nstate.add_read('_a')
+            b = nstate.add_read('_b')
+            c = nstate.add_write('_c')
             ga = nstate.add_access('_a_gpu')
             gb = nstate.add_access('_b_gpu')
             gc = nstate.add_access('_c_gpu')
@@ -621,23 +663,40 @@ class ExpandGemmTensorCore(ExpandTransformation):
             # End of copy to GPU
         else:
             # Arrays already on GPU
-            # TODO hhannesdo, have a look at this
+            # TODO hhannesdo change, copying like when data not already on GPU because kept getting CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+            # when writing results to _c
             for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
                 else:
                     dcopy = dc(desc)
                 dcopy.lifetime = dtypes.AllocationLifetime.Scope
-                dcopy.transient = True
+                dcopy_gpu = dc(dcopy)
+                dcopy.transient = False
                 nsdfg.add_datadesc(name, dcopy)
+                dcopy_gpu.transient = True
+                dcopy_gpu.storage = dace.StorageType.GPU_Global
+                nsdfg.add_datadesc(name + '_gpu', dcopy_gpu)
+            a = nstate.add_read('_a')
+            b = nstate.add_read('_b')
+            c = nstate.add_write('_c')
+            ga = nstate.add_access('_a_gpu')
+            gb = nstate.add_access('_b_gpu')
+            gc = nstate.add_access('_c_gpu')
 
-            # Adding connectors from GPU map directly to a,b and c
-            nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
-            nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
-            nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
+            nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
+            nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
+
+            nstate.add_edge(ga, None, map_entry, 'IN_a', dace.Memlet.from_array('_a_gpu', adesc))
+            nstate.add_edge(gb, None, map_entry, 'IN_b', dace.Memlet.from_array('_b_gpu', bdesc))
+            nstate.add_edge(map_exit, 'OUT_c', gc, None, dace.Memlet.from_array('_c_gpu', cdesc))
+            
+            nstate.add_nedge(gc, c, dace.Memlet.from_array('_c', cdesc))
 
             if node.beta != 0.0:
-                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
+                rgc = nstate.add_access('_c_gpu')
+                nstate.add_nedge(rc, rgc, dace.Memlet('_c'))
+                nstate.add_edge(rgc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c_gpu', cdesc))
         return nsdfg
 
 
