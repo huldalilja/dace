@@ -438,6 +438,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
         adtype = adesc.dtype.base_type
         bdtype = bdesc.dtype.base_type
         cdtype = cdesc.dtype.base_type
+        # TODO, for later when using A100, can support higher precision
+        # Will need to change things in the codegen too
         if adtype != dace.float16 or bdtype != dace.float16 or (cdtype != dace.float16 and cdtype != dace.float32):
             # TODO convert, if possible or use different architecture like Nvidia A100
             raise ValueError("Unsupported type: " + str(adtype))
@@ -561,15 +563,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         warp_map_exit.add_in_connector('IN' + arr_prefix + '_c')
         warp_map_exit.add_out_connector('OUT' + arr_prefix + '_c')
 
-        #tasklet = dace.sdfg.nodes.Tasklet(
-        #    node.name,
-        #    node.in_connectors,
-        #    node.out_connectors,
-        #    code,
-        #    language=dace.dtypes.Language.CPP,
-        #)
-
-        ###### Creating nested SDFG instead of kernel tasklet 
+        # Creating second nested SDFG 
         ksdfg = dace.SDFG('kernel_gemm')
 
         for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
@@ -588,7 +582,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         
         fill_tasklet = fill_state.add_tasklet('fill', None, None, 'wmma::fill_fragment(out, 0.0);', language=dace.dtypes.Language.CPP)
         fill_tasklet.add_out_connector('out')
-        ksdfg.add_array('ctile', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global, transient = True) # TODO hhannesdo, change storage and possibly other parameters
+        ksdfg.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
         ctile = fill_state.add_access('ctile')
         fill_state.add_edge(fill_tasklet, 'out', ctile, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
         
@@ -598,10 +592,10 @@ class ExpandGemmTensorCore(ExpandTransformation):
         
         aslice = wmma_state.add_read('_a')
         bslice = wmma_state.add_read('_b')
-        atile = wmma_state.add_array('atile', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global, transient = True) # TODO hhannesdo, change storage and possibly other parameters
-        btile = wmma_state.add_array('btile', (16, 16), dace.float16, storage=dtypes.StorageType.GPU_Global, transient = True) # TODO hhannesdo, change storage and possibly other parameters
-        wmma_state.add_edge(aslice, None, atile, None, dace.Memlet(data="_a", subset='0:16, k:k + 16'))
-        wmma_state.add_edge(bslice, None, btile, None, dace.Memlet(data="_b", subset='0:k + 16, 0:16'))
+        atile = wmma_state.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), dace.float16, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
+        btile = wmma_state.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), dace.float16, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
+        wmma_state.add_edge(aslice, None, atile, None, dace.Memlet(data="_a", subset='0:{WMMA_M}, k:k + {WMMA_K}'.format_map(opt)))
+        wmma_state.add_edge(bslice, None, btile, None, dace.Memlet(data="_b", subset='k:k + {WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
         wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(cfrag, afrag, bfrag);', language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
         wmma_tasklet.add_in_connector('bfrag')
@@ -612,7 +606,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
         wmma_state.add_edge(wmma_tasklet, 'cfrag', ctile, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
         
         nksdfg = nstate.add_nested_sdfg(ksdfg, nstate, {'_a', '_b', '_c'}, {'_c'}, name='kernel_gemm_nsdfg')
-        ############
 
         # Add connectors between GPU map and warp map
         nstate.add_edge(map_entry, 'OUT_a', warp_map_entry, 'IN' + arr_prefix + '_a', dace.Memlet(data="_a" + arr_suffix, subset='i:i+{WMMA_M}, 0:{K}'.format_map(opt)))

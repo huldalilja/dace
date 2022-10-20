@@ -34,6 +34,9 @@ class StorageType(aenum.AutoNumberEnum):
     CPU_ThreadLocal = ()  #: Thread-local host memory
     GPU_Global = ()  #: GPU global memory
     GPU_Shared = ()  #: On-GPU shared memory
+    GPU_TensorCore_A = () #: Matrix fragment A for Tensor Core
+    GPU_TensorCore_B = () #: Matrix fragment B for Tensor Core
+    GPU_TensorCore_Accumulator = () #: Accumulator fragment for Tensor Core
     FPGA_Global = ()  #: Off-chip global memory (DRAM)
     FPGA_Local = ()  #: On-chip memory (bulk storage)
     FPGA_Registers = ()  #: On-chip memory (fully partitioned registers)
@@ -87,6 +90,13 @@ GPU_SCHEDULES = [
 # A subset of on-GPU storage types
 GPU_STORAGES = [
     StorageType.GPU_Shared,
+]
+
+# On-GPU, Tensor Core storage types
+GPU_TENSOR_CORE_STORAGES = [
+    StorageType.GPU_TensorCore_A,
+    StorageType.GPU_TensorCore_B,
+    StorageType.GPU_TensorCore_Accumulator,
 ]
 
 # A subset of on-FPGA storage types

@@ -55,4 +55,4 @@ def test_gpu_localstorage():
 
 
 if __name__ == "__main__":
-    test_cpu()
+    test_cpu() # TODO change hhannesdo, to test_gpu_localstorage and debug within the codegen
