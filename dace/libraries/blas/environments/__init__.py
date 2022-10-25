@@ -2,4 +2,3 @@
 from .openblas import *
 from .intel_mkl import *
 from .cublas import *
-from .tensor_core import *

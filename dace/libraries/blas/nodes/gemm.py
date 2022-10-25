@@ -1,8 +1,5 @@
 # Copyright 2019-2021 ETH Zurich and the DaCe authors. All rights reserved.
-from asyncore import write
 from copy import deepcopy as dc
-from sched import scheduler
-from sys import prefix
 from typing import Any, Dict, Optional
 from dace import dtypes, memlet as mm, properties, data as dt
 from dace.libraries.standard.environments.cuda import CUDA as cudaenv
@@ -1219,7 +1216,7 @@ class Gemm(dace.sdfg.nodes.LibraryNode):
         "cuBLAS": ExpandGemmCuBLAS,
         "TensorCore": ExpandGemmTensorCore,
         "PBLAS": ExpandGemmPBLAS,
-        "FPGA1DSystolic": ExpandGemmFPGA1DSystolic,
+        "FPGA1DSystolic": ExpandGemmFPGA1DSystolic
     }
     default_implementation = None
 
