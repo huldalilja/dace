@@ -449,6 +449,10 @@ class ExpandGemmTensorCore(ExpandTransformation):
         func = '%sgemm' % to_blastype(dtype.type)
         opt = _get_codegen_gemm_opts(node, state, sdfg, adesc, bdesc, cdesc, alpha, beta, cdtype, func)
         opt['arr_prefix'] = arr_prefix = ''
+        opt['WMMA_M'] = node.WMMA_M
+        opt['WMMA_N'] = node.WMMA_N
+        opt['WMMA_K'] = node.WMMA_K
+        opt['WARP_SIZE'] = node.WARP_SIZE
         arr_suffix = ''
         if needs_copy:
             opt['arr_prefix'] = arr_prefix = '_conn'
@@ -470,6 +474,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['ldc'] = 'M'
             opt['major_order'] = 'col'
         
+        # TODO hhannesdo, remove this code after finished with adding final comp to SDFG
         opt['final_comp_and_storing'] = ""
         if(beta == 0):
             if(alpha != 1):
@@ -494,11 +499,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
         // Store the output
         wmma::store_matrix_sync({arr_prefix}_c, c_frag, {ldc}, wmma::mem_{major_order}_major);
         '''.format_map(opt)
-        
-        opt['WMMA_M'] = 16
-        opt['WMMA_N'] = 16
-        opt['WMMA_K'] = 16
-        opt['WARP_SIZE'] = 32
 
         wmma_kernel = '''
         const int WMMA_M = {WMMA_M};
@@ -527,7 +527,11 @@ class ExpandGemmTensorCore(ExpandTransformation):
     #include <mma.h>
     using namespace nvcuda;
     #endif
-'''
+
+    const int WMMA_M = {WMMA_M};
+    const int WMMA_N = {WMMA_N};
+    const int WMMA_K = {WMMA_K};
+'''.format_map(opt)
         # Appending the global code to the CUDA-generated file.
         if ('cuda' not in nsdfg.global_code or 'mma.h' not in nsdfg.global_code['cuda'].code):
             nsdfg.append_global_code(global_code, 'cuda')
@@ -589,11 +593,11 @@ class ExpandGemmTensorCore(ExpandTransformation):
         
         aslice = wmma_state.add_read('_a')
         bslice = wmma_state.add_read('_b')
-        atile = wmma_state.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), dace.float16, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
-        btile = wmma_state.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), dace.float16, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
+        atile = wmma_state.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), adesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
+        btile = wmma_state.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), bdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
         wmma_state.add_edge(aslice, None, atile, None, dace.Memlet(data="_a", subset='0:{WMMA_M}, k:k + {WMMA_K}'.format_map(opt)))
         wmma_state.add_edge(bslice, None, btile, None, dace.Memlet(data="_b", subset='k:k + {WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
-        wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(cfrag, afrag, bfrag);', language=dace.dtypes.Language.CPP)
+        wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(cfrag, afrag, bfrag, cfrag);', language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
         wmma_tasklet.add_in_connector('bfrag')
         wmma_tasklet.add_out_connector('cfrag')
@@ -1219,6 +1223,12 @@ class Gemm(dace.sdfg.nodes.LibraryNode):
         "FPGA1DSystolic": ExpandGemmFPGA1DSystolic
     }
     default_implementation = None
+
+    # Constants used in Tensor Core expansion
+    WMMA_M = 16
+    WMMA_N = 16
+    WMMA_K = 16
+    WARP_SIZE = 32
 
     # Object fields
     transA = properties.Property(dtype=bool, desc="Whether to transpose A before multiplying")

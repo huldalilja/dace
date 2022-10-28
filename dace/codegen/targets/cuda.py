@@ -22,7 +22,7 @@ from dace.codegen.dispatcher import DefinedType
 from dace.codegen.prettycode import CodeIOStream
 from dace.codegen.targets import cpp
 from dace.codegen.common import update_persistent_desc
-from dace.codegen.targets.cpp import (codeblock_to_cpp, cpp_array_expr, memlet_copy_to_absolute_strides, sym2cpp,
+from dace.codegen.targets.cpp import (codeblock_to_cpp, cpp_array_expr, cpp_offset_expr, memlet_copy_to_absolute_strides, sym2cpp,
                                       synchronize_streams, unparse_cr, unparse_cr_split)
 from dace.codegen.targets.target import IllegalCopy, TargetCodeGenerator, make_absolute
 from dace.config import Config
@@ -615,7 +615,7 @@ void __dace_exit_cuda({sdfg.name}_t *__state) {{
             maj = 'row' if nodedesc.strides[-1] == 1 else 'col'
             if nodedesc.dtype != dace.float16:
                 raise NotImplementedError('Tensor Core Matrix Fragments have to be of the type float16')
-            result_decl.write("wmma::fragment<wmma::matrix_%s, WMMA_M, WMMA_N, WMMA_K, %s, wmma::%s_major> %s;\n" % (fragment_type, nodedesc.dtype.ctype, maj, dataname))
+            result_decl.write("wmma::fragment<wmma::matrix_%s, WMMA_M, WMMA_N, WMMA_K, half, wmma::%s_major> %s;\n" % (fragment_type, maj, dataname))
             self._dispatcher.defined_vars.add(dataname, DefinedType.Pointer, ctypedef)
             if node.setzero:
                 raise NotImplementedError('setzero unsupported for Tensor Core fragment matrix memory')
@@ -628,7 +628,8 @@ void __dace_exit_cuda({sdfg.name}_t *__state) {{
                 raise NotImplementedError('Start offset unsupported for Tensor Core fragment memory')
             if nodedesc.dtype != dace.float16 and nodedesc.dtype != dace.float32:
                 raise NotImplementedError('Tensor Core Accumulator Fragments have to be of the type float16 or float32')
-            result_decl.write("wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, %s> %s;\n" % (nodedesc.dtype.ctype, dataname))
+            ctype = "half" if nodedesc.dtype == dace.float16 else nodedesc.dtype.ctype
+            result_decl.write("wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, %s> %s;\n" % (ctype, dataname))
             self._dispatcher.defined_vars.add(dataname, DefinedType.Pointer, ctypedef)
             if node.setzero:
                 result_alloc.write("wmma::fill_fragment(%s, 0.0f);\n" % (dataname))
@@ -1135,35 +1136,51 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
                     dace.StorageType.Register
                 ]
 
+                dst_desc = (dst_node.desc(sdfg) if isinstance(dst_node, nodes.AccessNode) else None)
+                src_desc = (src_node.desc(sdfg) if isinstance(src_node, nodes.AccessNode) else None)
+                nontc_desc = (dst_desc if src_desc.storage in dtypes.GPU_TENSOR_CORE_STORAGES else src_desc)
+                nontc_node = (dst_node if src_desc.storage in dtypes.GPU_TENSOR_CORE_STORAGES else src_node)
+
+                # Set non-tensor-core C++ expression based on memlet
+                if edge.data.data == nontc_node.data:
+                    other_expr = cpp_array_expr(sdfg, edge.data)
+                elif edge.data.other_subset is not None:
+                    offset_cppstr = cpp_offset_expr(nontc_desc, edge.data.other_subset)
+                    other_expr = '%s[%s]' % (nontc_node.data, offset_cppstr)
+                else:
+                    other_expr = '%s[0]' % nontc_node.data
+
                 # Loading to Tensor Core Fragment
                 if dst_storage in dtypes.GPU_TENSOR_CORE_STORAGES:
                     if src_storage not in gpu_storages:
                         raise NotImplementedError('Copy to Tensor Core Fragments is only supported from GPU storages')
+                    # TODO move out of if, use nontc var
                     maj = 'row' if dst_node.desc(sdfg).strides[-1] == 1 else 'col'
-                    stride = dst_node.desc(sdfg).strides[-1] if maj == 'row' else src_node.desc(sdfg).strides[0]
+                    # TODO also move out of if, use src_stride
+                    stride = src_node.desc(sdfg).strides[0] if maj == 'row' else src_node.desc(sdfg).strides[-1]
                     if dst_storage == dtypes.StorageType.GPU_TensorCore_Accumulator:
                         callsite_stream.write(
-                        ('    wmma::load_matrix_sync({frag}, {src}, {stride});').format(
-                             frag=_get_storagename(dst_storage),
-                             src=_get_storagename(src_storage),
-                             stride = stride))
+                        ('    wmma::load_matrix_sync({dst}, &{src}, {stride}, wmma::mem_{maj}_major);').format(
+                             dst=dst_expr,
+                             src=other_expr,
+                             stride=stride,
+                             maj=maj))
                     else:
                         callsite_stream.write(
-                        ('    wmma::load_matrix_sync({frag}, {src}, {stride}, wmma::mem_{maj}_major);').format(
-                             frag=_get_storagename(dst_storage),
-                             src=_get_storagename(src_storage),
-                             stride = stride,
-                             maj = maj))
+                        ('    wmma::load_matrix_sync({dst}, &{src}, {stride});').format(
+                             dst=dst_expr,
+                             src=other_expr,
+                             stride=stride))
                 # Storing from Tensor Core Fragment
                 elif src_storage in dtypes.GPU_TENSOR_CORE_STORAGES:
                     maj = 'row' if src_node.desc(sdfg).strides[-1] == 1 else 'col'
                     if dst_storage not in gpu_storages:
                         raise NotImplementedError('Copy from Tensor Core Fragments is only supported to GPU storages')
-                    stride = src_node.desc(sdfg).strides[-1] if maj == 'row' else src_node.desc(sdfg).strides[0]
+                    stride = dst_node.desc(sdfg).strides[0] if maj == 'row' else dst_node.desc(sdfg).strides[-1]
                     callsite_stream.write(
-                        ('    wmma::store_matrix_sync({dst}, {frag}, {stride}, wmma::mem_{maj}_major);').format(
-                             dst=_get_storagename(dst_storage),
-                             frag=_get_storagename(src_storage),
+                        ('    wmma::store_matrix_sync(&{dst}, {src}, {stride}, wmma::mem_{maj}_major);').format(
+                             dst=other_expr,
+                             src=src_expr,
                              stride = stride,
                              maj = maj))
 
@@ -1236,12 +1253,34 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
         dst_parent = state.entry_node(dst_node)
         dst_schedule = None if dst_parent is None else dst_parent.map.schedule
 
+        # Copying from tensor core fragments to/from tasklets.
+        # Only need to emit a reference, as the fragment contains the memory.
+        if (type(src_node) is nodes.AccessNode and sdfg.arrays[src_node.data].storage in dtypes.GPU_TENSOR_CORE_STORAGES) or \
+           (type(dst_node) is nodes.AccessNode and sdfg.arrays[dst_node.data].storage in dtypes.GPU_TENSOR_CORE_STORAGES):
+            # Tasklet -> WMMA Fragment
+            if isinstance(src_node, nodes.Tasklet):
+                local_name = dfg.memlet_path(memlet)[0].src_conn
+                # Use the "auto" keyword for simplicity.
+                callsite_stream.write('auto& %s = %s;' % (local_name, dst_node.data), sdfg, state_id, [src_node, dst_node])
+                return
+            # WMMA Fragment -> Tasklet
+            if isinstance(dst_node, nodes.Tasklet):
+                local_name = dfg.memlet_path(memlet)[-1].dst_conn
+                callsite_stream.write('auto& %s = %s;' % (local_name, src_node.data), sdfg, state_id, [src_node, dst_node])
+                return
+
         # Emit actual copy
         self._emit_copy(state_id, src_node, src_storage, dst_node, dst_storage, dst_schedule, memlet, sdfg, dfg,
                         callsite_stream)
 
     def define_out_memlet(self, sdfg, state_dfg, state_id, src_node, dst_node, edge, function_stream, callsite_stream):
-        self._cpu_codegen.define_out_memlet(sdfg, state_dfg, state_id, src_node, dst_node, edge, function_stream,
+        if (type(dst_node) is nodes.AccessNode and sdfg.arrays[dst_node.data].storage in dtypes.GPU_TENSOR_CORE_STORAGES) or \
+           (type(src_node) is nodes.AccessNode and sdfg.arrays[src_node.data].storage in dtypes.GPU_TENSOR_CORE_STORAGES):
+            # Output memlets that are directed at WMMA fragments can use the "auto"
+            # keyword for simplicity.
+            callsite_stream.write(f'auto& {edge.src_conn} = {edge.data.data};')
+        else:
+            self._cpu_codegen.define_out_memlet(sdfg, state_dfg, state_id, src_node, dst_node, edge, function_stream,
                                             callsite_stream)
 
     def process_out_memlets(self, *args, **kwargs):
