@@ -242,7 +242,7 @@ _CTYPES = {
     numpy.uint32: "unsigned int",
     numpy.uintc: "unsigned int",
     numpy.uint64: "unsigned long long",
-    numpy.float16: "dace::float16", # TODO hhannesdo, is this alright? Was dace::float16
+    numpy.float16: "dace::float16",
     numpy.float32: "float",
     numpy.float64: "double",
     numpy.complex64: "dace::complex64",

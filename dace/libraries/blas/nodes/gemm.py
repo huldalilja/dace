@@ -473,54 +473,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['ldb'] = 'K'
             opt['ldc'] = 'M'
             opt['major_order'] = 'col'
-        
-        # TODO hhannesdo, remove this code after finished with adding final comp to SDFG
-        opt['final_comp_and_storing'] = ""
-        if(beta == 0):
-            if(alpha != 1):
-                opt['final_comp_and_storing'] = '''
-        for(int l=0; l < acc_frag.num_elements; l++) {{
-            acc_frag.x[l] = {alpha} * acc_frag.x[l];
-        }}'''.format_map(opt)
 
-            opt['final_comp_and_storing'] += '''
-        
-        // Store the output
-        wmma::store_matrix_sync({arr_prefix}_c, acc_frag, {ldc}, wmma::mem_{major_order}_major);
-        '''.format_map(opt)
-        else:
-            opt['final_comp_and_storing'] = '''
-        wmma::load_matrix_sync(c_frag, {arr_prefix}_cin, {ldc}, wmma::mem_{major_order}_major);
-        
-        for(int l=0; l < c_frag.num_elements; l++) {{
-            c_frag.x[l] = {alpha} * acc_frag.x[l] + {beta} * c_frag.x[l];
-        }}
-
-        // Store the output
-        wmma::store_matrix_sync({arr_prefix}_c, c_frag, {ldc}, wmma::mem_{major_order}_major);
-        '''.format_map(opt)
-
-        wmma_kernel = '''
-        const int WMMA_M = {WMMA_M};
-        const int WMMA_N = {WMMA_N};
-        const int WMMA_K = {WMMA_K};
-        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::{major_order}_major> a_frag;
-        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::{major_order}_major> b_frag;
-        wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
-        wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
-        wmma::fill_fragment(acc_frag, 0.0f);
-        for (int k = 0; k < K; k += WMMA_K) {{
-            // Load the inputs
-            wmma::load_matrix_sync(a_frag, {arr_prefix}_a + k, {lda});
-            wmma::load_matrix_sync(b_frag, {arr_prefix}_b + (N * k), {ldb});
-    
-            // Perform the matrix multiplication
-            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-        }}
-        {final_comp_and_storing}'''.format_map(opt)
-
-        code = wmma_kernel
-
+        # Creating nested SDFG
         nsdfg = dace.SDFG('nested_gemm')
         global_code = '''
     #ifdef __CUDACC__
@@ -538,6 +492,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         
         nstate = nsdfg.add_state()
 
+        # Creating maps
         map_entry, map_exit = nstate.add_map(
             node.name,
             dict(i='0:{M}:{WMMA_M}'.format_map(opt), j='0:{N}:{WMMA_N}'.format_map(opt)),
@@ -564,7 +519,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         warp_map_exit.add_in_connector('IN' + arr_prefix + '_c')
         warp_map_exit.add_out_connector('OUT' + arr_prefix + '_c')
 
-        # Creating second nested SDFG 
+        # Creating second nested SDFG for code inside kernel
         ksdfg = dace.SDFG('kernel_gemm')
 
         for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
@@ -578,18 +533,47 @@ class ExpandGemmTensorCore(ExpandTransformation):
 
         fill_state = ksdfg.add_state('fill_state')
         wmma_state = ksdfg.add_state('wmma_state')
-        write_state = ksdfg.add_state('write_state')
-        ksdfg.add_loop(fill_state, wmma_state, write_state, 'k', '0', '(k < K)', '(k + 16)', wmma_state)
+        k_loop_after_state = None
+        ksdfg.add_array('acctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+
+        # Cleanup code for rest of gemm
+        # C = alpha * (A @ B) + beta * C 
+        if(alpha != 1 or beta != 0):
+            comp_state = ksdfg.add_state('comp_state')
+            acctile = comp_state.add_access('acctile')
+            k_loop_after_state = comp_state
+            if(beta != 0):
+                cslice = comp_state.add_read('_c')
+                ksdfg.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+                ctile = comp_state.add_access('ctile')
+                comp_state.add_edge(cslice, None, ctile, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+                opt["beta_code"] = " + {beta} * cfragin.x[l]".format_map(opt)
+            code = '''for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
+    cfrag.x[l] = {alpha} * accfrag.x[l]{beta_code};
+}}'''.format_map(opt)
+            comp_tasklet = comp_state.add_tasklet('comp', None, None, code, language=dace.dtypes.Language.CPP)
+            comp_tasklet.add_in_connector('accfrag')
+            comp_state.add_edge(acctile, None, comp_tasklet, 'accfrag', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            if beta != 0:
+                comp_tasklet.add_in_connector('cfragin')
+                comp_state.add_edge(ctile, None, comp_tasklet, 'cfragin', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            comp_tasklet.add_out_connector('cfrag')
+            ctile_out = comp_state.add_access('ctile')
+            comp_state.add_edge(comp_tasklet, 'cfrag',  ctile_out, None, dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            _c_out = comp_state.add_write('_c')
+            comp_state.add_edge(ctile_out, 'cfrag',  _c_out, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+        else:
+            write_state = ksdfg.add_state('write_state')
+            c_out = write_state.add_write('_c')
+            acctile = write_state.add_access('acctile')
+            write_state.add_edge(acctile, None, c_out, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            k_loop_after_state = write_state
         
+        ksdfg.add_loop(fill_state, wmma_state, k_loop_after_state, 'k', '0', '(k < K)', '(k + {WMMA_K})'.format_map(opt), wmma_state)
+
         fill_tasklet = fill_state.add_tasklet('fill', None, None, 'wmma::fill_fragment(out, 0.0);', language=dace.dtypes.Language.CPP)
         fill_tasklet.add_out_connector('out')
-        ksdfg.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
-        ctile = fill_state.add_access('ctile')
-        fill_state.add_edge(fill_tasklet, 'out', ctile, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
-        
-        c_out = write_state.add_write('_c')
-        ctile = write_state.add_access('ctile')
-        write_state.add_edge(ctile, None, c_out, None, dace.Memlet(data="_c", subset='0:16, 0:16'))
+        fill_state.add_edge(fill_tasklet, 'out', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         
         aslice = wmma_state.add_read('_a')
         bslice = wmma_state.add_read('_b')
@@ -597,14 +581,14 @@ class ExpandGemmTensorCore(ExpandTransformation):
         btile = wmma_state.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), bdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
         wmma_state.add_edge(aslice, None, atile, None, dace.Memlet(data="_a", subset='0:{WMMA_M}, k:k + {WMMA_K}'.format_map(opt)))
         wmma_state.add_edge(bslice, None, btile, None, dace.Memlet(data="_b", subset='k:k + {WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
-        wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(cfrag, afrag, bfrag, cfrag);', language=dace.dtypes.Language.CPP)
+        wmma_tasklet = wmma_state.add_tasklet('wmma', None, None, 'wmma::mma_sync(accfrag, afrag, bfrag, accfrag);', language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
         wmma_tasklet.add_in_connector('bfrag')
-        wmma_tasklet.add_out_connector('cfrag')
-        wmma_state.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:16, 0:16'))
-        wmma_state.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:16, 0:16'))
-        ctile = wmma_state.add_access('ctile')
-        wmma_state.add_edge(wmma_tasklet, 'cfrag', ctile, None, dace.Memlet(data="ctile", subset='0:16, 0:16'))
+        wmma_tasklet.add_out_connector('accfrag')
+        wmma_state.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
+        wmma_state.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
+        acctile = wmma_state.add_access('acctile')
+        wmma_state.add_edge(wmma_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         
         nksdfg = nstate.add_nested_sdfg(ksdfg, nstate, {'_a', '_b', '_c'}, {'_c'}, name='kernel_gemm_nsdfg')
 
@@ -647,10 +631,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
             ga = nstate.add_access('_a_gpu')
             gb = nstate.add_access('_b_gpu')
             gc = nstate.add_access('_c_gpu')
-
-            # Reset code and connectors
-            #tasklet.in_connectors = {"_conn" + k: None for k in tasklet.in_connectors}
-            #tasklet.out_connectors = {"_conn" + k: None for k in tasklet.out_connectors}
 
             nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
             nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
