@@ -605,7 +605,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
             rc = nstate.add_read('_c')
             map_entry.add_in_connector('IN_c')
             map_entry.add_out_connector('OUT_c')
-            nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
             warp_map_entry.add_in_connector('IN' + arr_prefix + '_c')
             warp_map_entry.add_out_connector('OUT' + arr_prefix + '_c')
             nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, 'IN' + arr_prefix + '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
@@ -645,7 +644,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
                 rgc = nstate.add_access('_c_gpu')
                 nstate.add_nedge(rc, rgc, dace.Memlet('_c'))
                 nstate.add_edge(rgc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c_gpu', cdesc))
-            # End of copy to GPU
         else:
             # Arrays already on GPU
             for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
@@ -664,6 +662,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
             nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
             nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
 
+            if node.beta != 0.0:
+                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
         return nsdfg
 
 
