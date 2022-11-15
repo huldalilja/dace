@@ -520,7 +520,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
         # Creating second nested SDFG for code inside kernel
         ksdfg = dace.SDFG('kernel_gemm')
 
-        fill_state = ksdfg.add_state('fill_state')
         wmma_state = ksdfg.add_state('wmma_state')
         k_loop_after_state = None
         ksdfg.add_array('acctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
@@ -558,12 +557,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
             write_state.add_edge(acctile, None, c_out, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
             k_loop_after_state = write_state
         
-        ksdfg.add_loop(fill_state, wmma_state, k_loop_after_state, 'k', '0', '(k < K)', '(k + {WMMA_K})'.format_map(opt), wmma_state)
+        ksdfg.add_loop(None, wmma_state, k_loop_after_state, 'k', '0', '(k < K)', '(k + {WMMA_K})'.format_map(opt), wmma_state)
 
-        fill_tasklet = fill_state.add_tasklet('fill', None, None, 'wmma::fill_fragment(out, 0.0);', language=dace.dtypes.Language.CPP)
-        fill_tasklet.add_out_connector('out')
-        fill_state.add_edge(fill_tasklet, 'out', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-        
         aslice = wmma_state.add_read('_a')
         bslice = wmma_state.add_read('_b')
         atile = wmma_state.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), adesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
@@ -577,6 +572,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         wmma_state.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
         wmma_state.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
         acctile = wmma_state.add_access('acctile')
+        acctile.setzero = True
         wmma_state.add_edge(wmma_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         
         # Adding data descs to innermost nested SDFG
