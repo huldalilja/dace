@@ -493,7 +493,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         # Creating maps
         map_entry, map_exit = nstate.add_map(
             node.name,
-            dict(i='0:{M}+({WMMA_M}-1):{WMMA_M}'.format_map(opt), j='0:{N}+({WMMA_N}-1):{WMMA_N}'.format_map(opt)),
+            dict(i='0:{M}:{WMMA_M}'.format_map(opt), j='0:{N}:{WMMA_N}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_Device
         )
 
