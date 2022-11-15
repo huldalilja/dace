@@ -493,7 +493,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         # Creating maps
         map_entry, map_exit = nstate.add_map(
             node.name,
-            dict(i='0:{M}:{WMMA_M}'.format_map(opt), j='0:{N}:{WMMA_N}'.format_map(opt)),
+            dict(i='0:{M}+({WMMA_M}-1):{WMMA_M}'.format_map(opt), j='0:{N}+({WMMA_N}-1):{WMMA_N}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_Device
         )
 
@@ -579,6 +579,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         acctile = wmma_state.add_access('acctile')
         wmma_state.add_edge(wmma_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         
+        # Adding data descs to innermost nested SDFG
         for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
             if isinstance(desc, dt.View):
                 dcopy = desc.as_array()
