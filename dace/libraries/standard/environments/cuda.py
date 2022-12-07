@@ -14,7 +14,7 @@ class CUDA:
     cmake_link_flags = []
     cmake_files = []
 
-    headers = []
+    headers = {'cuda': ['../include/cuda_helper.h', '../include/helper_string.h']}
     state_fields = []
     init_code = ""
     finalize_code = ""
