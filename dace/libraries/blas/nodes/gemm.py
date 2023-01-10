@@ -1093,17 +1093,20 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         
         # Setting tiling and skewing parameters
         # TODO hhannesdo find best values
-        opt['WM'] = 4
-        opt['WN'] = 4
+        opt['WM'] = 'WM'
+        opt['WN'] = 'WN'
         
-        opt['SM'] =  opt['WMMA_M']* opt['WM'] 
-        opt['SN'] =  opt['WMMA_N']* opt['WN'] 
+        opt['SM'] =  f"({opt['WMMA_M']} * {opt['WM']})"
+        opt['SN'] =  f"({opt['WMMA_N']} * {opt['WN']})" 
         opt['SK'] =  opt['WMMA_K']
 
-        opt['SSKEW'] = 8
+        opt['SSKEW'] = 'SSKEW'
 
         ##############################
         # Creating nested SDFG
+        sdfg.add_constant('WM', 4)
+        sdfg.add_constant('WN', 4)
+        sdfg.add_constant('SSKEW', 8)
         nsdfg = dace.SDFG('nested_gemm')
         global_code = '''
     #ifdef __CUDACC__
@@ -1114,6 +1117,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
     #define WMMA_M {WMMA_M}
     #define WMMA_N {WMMA_N}
     #define WMMA_K {WMMA_K}
+'''.format_map(opt)
 
     #define WM {WM}
     #define WN {WN}
@@ -1123,7 +1127,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
     #define SK {SK}
 
     #define SKEW {SSKEW}
-'''.format_map(opt)
+# '''.format_map(opt)
 
         # Appending the global code to the CUDA-generated file.
         if ('cuda' not in nsdfg.global_code or 'mma.h' not in nsdfg.global_code['cuda'].code):
@@ -1206,8 +1210,8 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # Adding shared memory of sizes SM*SK for a and SK*SN for b
         # Each warp(WM*WN warps) then computes a WMMA_M * WMMA_N of the output, in accumulation, while readong from shared memory accordingly  
         # TODO hhannesdo add the skewing
-        nsdfg.add_array('shared_a', (opt['SM'], opt['SK'] + opt['SSKEW']), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
-        nsdfg.add_array('shared_b', (opt['SK'], opt['SN'] + opt['SSKEW']), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        nsdfg.add_array('shared_a', (opt['SM'], f"({opt['SK']} + {opt['SSKEW']})"), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        nsdfg.add_array('shared_b', (opt['SK'], f"({opt['SN']} + {opt['SSKEW']})"), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
@@ -1227,8 +1231,8 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # nstate.add_edge(k_map_entry, b_out_name, bshared, None, dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt)))
         # nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='threadId/{WARP_SIZE}/{WN}:threadId/{WARP_SIZE}/{WN} + {WMMA_M}, 0:{SK}'.format_map(opt)))
         # nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},threadId/{WARP_SIZE}%{WM}:threadId/{WARP_SIZE}%{WM} + {WMMA_N}'.format_map(opt)))
-        nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, 0:{SK}'.format_map(opt), other_subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, 0:{SK}'.format_map(opt)))
-        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt), other_subset='0:{SK}, j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
+        nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, 0:{SK}'.format_map(opt)))
+        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt)))
 
         wmma_tasklet = nstate.add_tasklet('wmma', None, None, "wmma::mma_sync(accfrag, afrag, bfrag, accfrag);", language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
@@ -1344,8 +1348,8 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             # nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
             # nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
             # nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
-            nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt)))
-            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt)))
+            nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
+            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
             nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
                                                                                                                          'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
 
@@ -1357,6 +1361,15 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
         # xfutil.tile(nsdfg, map_entry, True, False, i=256, j=256)
         
         DoubleBuffering.apply_to(nsdfg, map_entry=k_map_entry, transient=ashared)
+        for st, _ in nsdfg.all_nodes_recursive():
+            if isinstance(st, SDFGState) and st.label == f'{k_map_entry.label}_double_buffered':
+                for n in st.nodes():
+                    if isinstance(n, dace.sdfg.nodes.AccessNode) and n.data == 'acctile':
+                        for e in st.out_edges(n):
+                            st.remove_node(e.dst)
+                            # st.remove_edge(e)
+                        break
+                break
         return nsdfg
 
 
