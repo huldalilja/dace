@@ -1014,13 +1014,14 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
 class ExpandGemmTensorCore3(ExpandTransformation):
     # TODO hhannesdo, need to check somewhere if device has Tensor Cores
 
-    # Import here to avoid circular dependency
-    from dace.transformation.dataflow import DoubleBuffering
     environments = [cudaenv]
 
     @staticmethod
     def expansion(node, state, sdfg):
         print("Optimized Expand Tensor Core Version")
+
+        # Import here to avoid circular dependency
+        from dace.transformation.dataflow import DoubleBuffering
 
         node.validate(sdfg, state)
 
@@ -1336,7 +1337,7 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
         ##### Optimization tests #####
         # xfutil.tile(nsdfg, map_entry, True, False, i=256, j=256)
         
-        DoubleBuffering.apply_to(sdfg, map_entry=k_map_entry, transient=ashared)
+        #DoubleBuffering.apply_to(sdfg, map_entry=k_map_entry, transient=ashared)
         return nsdfg
 
 
