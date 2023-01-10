@@ -1131,48 +1131,56 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         
         nstate = nsdfg.add_state()
 
-        ##############################
-        # Names for in and out connectors in maps to reuse accross different maps
-        a_in_name = 'IN' + arr_prefix + '_a'
-        a_out_name = 'OUT' + arr_prefix + '_a'
-        b_in_name = 'IN' + arr_prefix + '_b'
-        b_out_name = 'OUT' + arr_prefix + '_b'
-        c_in_name = 'IN' + arr_prefix + '_c'
-        c_out_name = 'OUT' + arr_prefix + '_c'
+        # ##############################
+        # # Names for in and out connectors in maps to reuse accross different maps
+        # a_in_name = 'IN' + arr_prefix + '_a'
+        # a_out_name = 'OUT' + arr_prefix + '_a'
+        # b_in_name = 'IN' + arr_prefix + '_b'
+        # b_out_name = 'OUT' + arr_prefix + '_b'
+        # c_in_name = 'IN' + arr_prefix + '_c'
+        # c_out_name = 'OUT' + arr_prefix + '_c'
 
         ##############################
         # Creating first map, iterating slices
         map_entry, map_exit = nstate.add_map(
             node.name,
-            dict(i='0:{M}:{SM}'.format_map(opt), j='0:{N}:{SN}'.format_map(opt)),
+            dict(j='0:{N}:{SN}'.format_map(opt), i='0:{M}:{SM}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_Device
         )
-        map_entry.add_in_connector('IN_a')
-        map_entry.add_in_connector('IN_b')
-        map_entry.add_out_connector('OUT_a')
-        map_entry.add_out_connector('OUT_b')
-        map_exit.add_in_connector('IN_c')
-        map_exit.add_out_connector('OUT_c')
+        # map_entry.add_in_connector('IN_a')
+        # map_entry.add_in_connector('IN_b')
+        # map_entry.add_out_connector('OUT_a')
+        # map_entry.add_out_connector('OUT_b')
+        # map_exit.add_in_connector('IN_c')
+        # map_exit.add_out_connector('OUT_c')
 
         ##############################
         # Second map for thread block
+        # warp_map_entry, warp_map_exit = nstate.add_map(
+        #     'warp_map',
+        #     dict(threadId ='0:{WM}*{WN}*{WARP_SIZE}'.format_map(opt)),
+        #     dace.dtypes.ScheduleType.GPU_ThreadBlock
+        # )
         warp_map_entry, warp_map_exit = nstate.add_map(
             'warp_map',
-            dict(threadId ='0:{WM}*{WN}*{WARP_SIZE}'.format_map(opt)),
+            dict(tIdz ='0:{WN}'.format_map(opt), tIdy ='0:{WM}'.format_map(opt), tIdx ='0:{WARP_SIZE}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_ThreadBlock
         )
-        warp_map_entry.add_in_connector(a_in_name)
-        warp_map_entry.add_in_connector(b_in_name)
-        warp_map_entry.add_out_connector(a_out_name)
-        warp_map_entry.add_out_connector(b_out_name)
-        warp_map_exit.add_in_connector(c_in_name)
-        warp_map_exit.add_out_connector(c_out_name)
+        # warp_i = tIdy * WMMA_M
+        # warp_j = tIdz * WMMA_N
+
+        # warp_map_entry.add_in_connector(a_in_name)
+        # warp_map_entry.add_in_connector(b_in_name)
+        # warp_map_entry.add_out_connector(a_out_name)
+        # warp_map_entry.add_out_connector(b_out_name)
+        # warp_map_exit.add_in_connector(c_in_name)
+        # warp_map_exit.add_out_connector(c_out_name)
 
         ##############################
         # Add connectors between first (GPU) map and warp map
-        nstate.add_edge(map_entry, 'OUT_a', warp_map_entry, a_in_name, dace.Memlet(data="_a" + arr_suffix, subset='i:i+{SM}, 0:{K}'.format_map(opt)))
-        nstate.add_edge(map_entry, 'OUT_b', warp_map_entry, b_in_name, dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{SN}'.format_map(opt)))
-        nstate.add_edge(warp_map_exit, c_out_name, map_exit, 'IN_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{SM}, j:j+{SN}'.format_map(opt)))
+        # nstate.add_edge(map_entry, 'OUT_a', warp_map_entry, a_in_name, dace.Memlet(data="_a" + arr_suffix, subset='i:i+{SM}, 0:{K}'.format_map(opt)))
+        # nstate.add_edge(map_entry, 'OUT_b', warp_map_entry, b_in_name, dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{SN}'.format_map(opt)))
+        # nstate.add_edge(warp_map_exit, c_out_name, map_exit, 'IN_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{SM}, j:j+{SN}'.format_map(opt)))
 
         ##############################
         # Innermost k map, for iterating through k dimension
@@ -1181,29 +1189,29 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             dict(k ='0:{K}:{SK}'.format_map(opt)),
             dace.dtypes.ScheduleType.Sequential
         )
-        k_map_entry.add_in_connector(a_in_name)
-        k_map_entry.add_in_connector(b_in_name)
-        k_map_entry.add_out_connector(a_out_name)
-        k_map_entry.add_out_connector(b_out_name)
-        k_map_exit.add_in_connector(c_in_name)
-        k_map_exit.add_out_connector(c_out_name)
+        # k_map_entry.add_in_connector(a_in_name)
+        # k_map_entry.add_in_connector(b_in_name)
+        # k_map_entry.add_out_connector(a_out_name)
+        # k_map_entry.add_out_connector(b_out_name)
+        # k_map_exit.add_in_connector(c_in_name)
+        # k_map_exit.add_out_connector(c_out_name)
 
-        ##############################
-        # Add connectors between warp map and k-map
-        nstate.add_edge(warp_map_entry, 'OUT_a', k_map_entry, a_in_name, dace.Memlet(data="_a" + arr_suffix, subset='i:i+{SM}, 0:{K}'.format_map(opt)))
-        nstate.add_edge(warp_map_entry, 'OUT_b', k_map_entry, b_in_name, dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{SN}'.format_map(opt)))
-        # Skipping edge from k_map_exit to warp_map_exit here since added later with a shared memory in between
+        # ##############################
+        # # Add connectors between warp map and k-map
+        # nstate.add_edge(warp_map_entry, 'OUT_conn_a', k_map_entry, a_in_name, dace.Memlet(data="_a" + arr_suffix, subset='i:i+{SM}, 0:{K}'.format_map(opt)))
+        # nstate.add_edge(warp_map_entry, 'OUT_conn_b', k_map_entry, b_in_name, dace.Memlet(data="_b" + arr_suffix, subset='0:{K}, j:j+{SN}'.format_map(opt)))
+        # # Skipping edge from k_map_exit to warp_map_exit here since added later with a shared memory in between
 
         ##############################
         # Adding shared memory of sizes SM*SK for a and SK*SN for b
         # Each warp(WM*WN warps) then computes a WMMA_M * WMMA_N of the output, in accumulation, while readong from shared memory accordingly  
         # TODO hhannesdo add the skewing
-        nsdfg.add_array('shared_a', (opt['SM'], opt['SK']), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
-        nsdfg.add_array('shared_b', (opt['SK'], opt['SN']), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
-        nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        nsdfg.add_array('shared_a', (opt['SM'], opt['SK'] + opt['SSKEW']), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        nsdfg.add_array('shared_b', (opt['SK'], opt['SN'] + opt['SSKEW']), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
-        c_shared_out = nstate.add_access('shared_c')
+        # c_shared_out = nstate.add_access('shared_c')
 
         ##############################
         # Adding Tensor Core arrays
@@ -1215,11 +1223,13 @@ class ExpandGemmTensorCore3(ExpandTransformation):
 
         ##############################
         # Moving data from global memory to shared memory to pass on to  kernel (wmma computation)
-        nstate.add_edge(k_map_entry, a_out_name, ashared, None, dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt)))
-        nstate.add_edge(k_map_entry, b_out_name, bshared, None, dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt)))
-        nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='threadId/{WARP_SIZE}/{WN}:threadId/{WARP_SIZE}/{WN} + {WMMA_M}, 0:{SK}'.format_map(opt)))
-        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},threadId/{WARP_SIZE}%{WM}:threadId/{WARP_SIZE}%{WM} + {WMMA_N}'.format_map(opt)))
-        
+        # nstate.add_edge(k_map_entry, a_out_name, ashared, None, dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt)))
+        # nstate.add_edge(k_map_entry, b_out_name, bshared, None, dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt)))
+        # nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='threadId/{WARP_SIZE}/{WN}:threadId/{WARP_SIZE}/{WN} + {WMMA_M}, 0:{SK}'.format_map(opt)))
+        # nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},threadId/{WARP_SIZE}%{WM}:threadId/{WARP_SIZE}%{WM} + {WMMA_N}'.format_map(opt)))
+        nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, 0:{SK}'.format_map(opt), other_subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, 0:{SK}'.format_map(opt)))
+        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt), other_subset='0:{SK}, j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
+
         wmma_tasklet = nstate.add_tasklet('wmma', None, None, "wmma::mma_sync(accfrag, afrag, bfrag, accfrag);", language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
         wmma_tasklet.add_in_connector('bfrag')
@@ -1227,7 +1237,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         nstate.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
         nstate.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
         nstate.add_edge(wmma_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-        nstate.add_edge(acctile, None, k_map_exit, c_in_name, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+        # nstate.add_edge(acctile, None, k_map_exit, c_in_name, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
 
         ##############################
         # Cleanup code for rest of gemm
@@ -1264,19 +1274,19 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
         
         ##############################
         # Move results from Tensor Core array to shared and then global memory
-        nstate.add_edge(k_map_exit, c_out_name, c_shared_out, None, dace.Memlet(data="shared_c", subset='threadId/{WARP_SIZE}/{WN}:threadId/{WARP_SIZE}/{WN} + {WMMA_M}, threadId/{WARP_SIZE}%{WM}:threadId/{WARP_SIZE}%{WM} + {WMMA_N}'.format_map(opt)))
-        nstate.add_edge(c_shared_out, None, warp_map_exit, c_in_name, dace.Memlet(data="_c", subset='i:i + {SM}, j:j + {SN}'.format_map(opt)))
+        # nstate.add_edge(k_map_exit, c_out_name, c_shared_out, None, dace.Memlet(data="shared_c", subset='threadId/{WARP_SIZE}/{WN}:threadId/{WARP_SIZE}/{WN} + {WMMA_M}, threadId/{WARP_SIZE}%{WM}:threadId/{WARP_SIZE}%{WM} + {WMMA_N}'.format_map(opt)))
+        # nstate.add_edge(c_shared_out, None, warp_map_exit, c_in_name, dace.Memlet(data="_c", subset='i:i + {SM}, j:j + {SN}'.format_map(opt)))
         
         ##############################
         # If c is also an input to read, send through all maps to wmma tasklet
         if node.beta != 0.0:
             rc = nstate.add_access('_c')
-            map_entry.add_in_connector('IN_c')
-            map_entry.add_out_connector('OUT_c')
-            warp_map_entry.add_in_connector(c_in_name)
-            warp_map_entry.add_out_connector(c_out_name)
-            nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, c_in_name, dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
-            nstate.add_edge(warp_map_entry, c_out_name, k_map_entry, c_in_name, dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+        #     map_entry.add_in_connector('IN_c')
+        #     map_entry.add_out_connector('OUT_c')
+        #     warp_map_entry.add_in_connector(c_in_name)
+        #     warp_map_entry.add_out_connector(c_out_name)
+        #     nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, c_in_name, dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+        #     nstate.add_edge(warp_map_entry, c_out_name, k_map_entry, c_in_name, dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
 
         ##############################
         # If buffers are not on the GPU, copy them
@@ -1303,10 +1313,14 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
             nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
 
-            nstate.add_edge(ga, None, map_entry, 'IN_a', dace.Memlet.from_array('_a_gpu', adesc))
-            nstate.add_edge(gb, None, map_entry, 'IN_b', dace.Memlet.from_array('_b_gpu', bdesc))
-            nstate.add_edge(map_exit, 'OUT_c', gc, None, dace.Memlet.from_array('_c_gpu', cdesc))
-            
+            # nstate.add_edge(ga, None, map_entry, 'IN_a', dace.Memlet.from_array('_a_gpu', adesc))
+            # nstate.add_edge(gb, None, map_entry, 'IN_b', dace.Memlet.from_array('_b_gpu', bdesc))
+            # nstate.add_edge(map_exit, 'OUT_c', gc, None, dace.Memlet.from_array('_c_gpu', cdesc))
+            nstate.add_memlet_path(ga, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a_gpu", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
+            nstate.add_memlet_path(gb, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b_gpu", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, gc, memlet=dace.Memlet(data="_c_gpu", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
+                                                                                                                              'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
+
             nstate.add_nedge(gc, c, dace.Memlet.from_array('_c', cdesc))
 
             if beta != 0.0:
@@ -1327,9 +1341,14 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             b = nstate.add_access('_b')
             c = nstate.add_access('_c')
 
-            nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
-            nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
-            nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
+            # nstate.add_edge(a, None, map_entry, 'IN_a', dace.Memlet.from_array('_a', adesc))
+            # nstate.add_edge(b, None, map_entry, 'IN_b', dace.Memlet.from_array('_b', bdesc))
+            # nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
+            nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt)))
+            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
+                                                                                                                         'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
+
 
             if node.beta != 0.0:
                 nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
@@ -1337,7 +1356,7 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
         ##### Optimization tests #####
         # xfutil.tile(nsdfg, map_entry, True, False, i=256, j=256)
         
-        #DoubleBuffering.apply_to(sdfg, map_entry=k_map_entry, transient=ashared)
+        DoubleBuffering.apply_to(nsdfg, map_entry=k_map_entry, transient=ashared)
         return nsdfg
 
 
