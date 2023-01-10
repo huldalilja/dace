@@ -352,6 +352,8 @@ DACE_EXPORTED void __dace_exit_{sdfg.name}({sdfg.name}_t *__state)
         if len(components) <= 1:
             self._dispatcher.dispatch_subgraph(sdfg, state, sid, global_stream, callsite_stream, skip_entry_node=False)
         else:
+            # NOTE: Experimental, move components with CodeNodes to the end
+            components.sort(key=lambda c: 1 if any([isinstance(n, nodes.CodeNode) for n in c.nodes()]) else 0)
             if sdfg.openmp_sections:
                 callsite_stream.write("#pragma omp parallel sections\n{")
             for c in components:
