@@ -1157,7 +1157,8 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
                     # TODO move out of if, use nontc var
                     maj = 'row' if dst_node.desc(sdfg).strides[-1] == 1 else 'col'
                     # TODO also move out of if, use src_stride
-                    stride = src_node.desc(sdfg).strides[0] if maj == 'row' else src_node.desc(sdfg).strides[-1]
+                    # NOTE: I don't like this
+                    stride = src_node.desc(sdfg).strides[-2] if maj == 'row' else src_node.desc(sdfg).strides[-1]
                     if dst_storage == dtypes.StorageType.GPU_TensorCore_Accumulator:
                         callsite_stream.write(
                         ('    wmma::load_matrix_sync({dst}, &{src}, {stride}, wmma::mem_{maj}_major);').format(
@@ -1185,7 +1186,7 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
                              maj = maj))
 
             # Collaborative load
-            elif inner_schedule == dtypes.ScheduleType.GPU_Device:
+            elif inner_schedule in (dtypes.ScheduleType.GPU_Device, dtypes.ScheduleType.GPU_ThreadBlock):
                 # Obtain copy information
                 copy_shape, src_strides, dst_strides, src_expr, dst_expr = (memlet_copy_to_absolute_strides(
                     self._dispatcher, sdfg, memlet, src_node, dst_node, self._cpu_codegen._packed_types))
@@ -1375,12 +1376,13 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
 
         # Special case: if this is a GPU grid state and something is reading
         # from a possible result of a collaborative write, sync first
-        if self._toplevel_schedule == dtypes.ScheduleType.GPU_Device:
+        if self._toplevel_schedule in (dtypes.ScheduleType.GPU_Device, dtypes.ScheduleType.GPU_ThreadBlock):
             state_id = next(i for i, s in enumerate(sdfg.nodes()) if s == state)
             for node in state.nodes():
                 if (isinstance(node, nodes.AccessNode) and node.desc(sdfg).storage == dtypes.StorageType.GPU_Shared
                         and state.in_degree(node) == 0 and state.out_degree(node) > 0):
-                    if not self._scope_has_collaborative_copy:
+                    # if not self._scope_has_collaborative_copy:
+                    if self._scope_has_collaborative_copy:
                         callsite_stream.write('__syncthreads();', sdfg, state_id)
                     break
 
@@ -1888,7 +1890,8 @@ void  *{kname}_args[] = {{ {kargs} }};
                 # Extend to 3 dimensions if necessary
                 tbsize = tbsize + [1] * (len(block_size) - len(tbsize))
 
-                block_size = [sympy.Max(sz, bbsz) for sz, bbsz in zip(block_size, tbsize)]
+                # block_size = [sympy.Max(sz, bbsz) for sz, bbsz in zip(block_size, tbsize)]
+                block_size = [bbsz for sz, bbsz in zip(block_size, tbsize)]
                 if block_size != tbsize:
                     detected_block_sizes.append(tbsize)
 
