@@ -875,7 +875,7 @@ void calling_gemm(dace::float16* a, dace::float16* b, float* c, float alpha, flo
                 ksdfg.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
                 ctile = comp_state.add_access('ctile')
                 comp_state.add_edge(cslice, None, ctile, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-                opt["beta_code"] = " + {beta} * cfrag.x[l]".format_map(opt)
+                opt["beta_code"] = " + {beta} * cfragin.x[l]".format_map(opt)
             code = '''#pragma unroll
 for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
     cfrag.x[l] = {alpha} * accfrag.x[l]{beta_code};
@@ -884,8 +884,8 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             comp_tasklet.add_in_connector('accfrag')
             comp_state.add_edge(acctile, None, comp_tasklet, 'accfrag', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
             if beta != 0:
-                comp_tasklet.add_in_connector('cfrag')
-                comp_state.add_edge(ctile, None, comp_tasklet, 'cfrag', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+                comp_tasklet.add_in_connector('cfragin')
+                comp_state.add_edge(ctile, None, comp_tasklet, 'cfragin', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
             comp_tasklet.add_out_connector('cfrag')
             ctile_out = comp_state.add_access('ctile')
             comp_state.add_edge(comp_tasklet, 'cfrag',  ctile_out, None, dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
@@ -1037,6 +1037,10 @@ class ExpandGemmTensorCore3(ExpandTransformation):
                 bnode = state.memlet_path(e)[0].src
                 if isinstance(bnode, dace.sdfg.nodes.AccessNode):
                     bdesc: dt.Array = sdfg.arrays[bnode.data]
+            elif e.dst_conn == '_cin':
+                cinnode = state.memlet_path(e)[0].src
+                if isinstance(cinnode, dace.sdfg.nodes.AccessNode):
+                    cindesc: dt.Array = sdfg.arrays[cinnode.data]
         for e in state.out_edges(node):
             if e.src_conn == '_c':
                 cnode = state.memlet_path(e)[-1].dst
@@ -1092,6 +1096,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             opt['major_order'] = 'col'
         
         # Setting tiling and skewing parameters
+        # TODO hhannesdo find best values
         opt['WM'] = 'WM'
         opt['WN'] = 'WN'
         
@@ -1103,7 +1108,6 @@ class ExpandGemmTensorCore3(ExpandTransformation):
 
         ##############################
         # Creating nested SDFG
-        # TODO hhannesdo find best values
         sdfg.add_constant('WM', 4)
         sdfg.add_constant('WN', 4)
         sdfg.add_constant('SSKEW', 8)
@@ -1132,7 +1136,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             dict(j='0:{N}:{SN}'.format_map(opt), i='0:{M}:{SM}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_Device
         )
-
+        
         ##############################
         # Second map for thread block
         warp_map_entry, warp_map_exit = nstate.add_map(
@@ -1140,6 +1144,8 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             dict(tIdz ='0:{WN}'.format_map(opt), tIdy ='0:{WM}'.format_map(opt), tIdx ='0:{WARP_SIZE}'.format_map(opt)),
             dace.dtypes.ScheduleType.GPU_ThreadBlock
         )
+        # warp_i = tIdy * WMMA_M
+        # warp_j = tIdz * WMMA_N
 
         ##############################
         # Innermost k map, for iterating through k dimension
@@ -1154,14 +1160,18 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # Each warp(WM*WN warps) then computes a WMMA_M * WMMA_N of the output, in accumulation, while readong from shared memory accordingly  
         nsdfg.add_array('shared_a', (opt['SM'], f"({opt['SK']} + {opt['SSKEW']})"), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         nsdfg.add_array('shared_b', (opt['SK'], f"({opt['SN']} + {opt['SSKEW']})"), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
+        # c_shared_out = nstate.add_access('shared_c')
 
         ##############################
         # Adding Tensor Core arrays
-        atile = nstate.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), adesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
-        btile = nstate.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), bdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
+        nsdfg.add_array('atile', (opt['WMMA_M'], opt['WMMA_K']), adesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_A, transient = True)
+        nsdfg.add_array('btile', (opt['WMMA_K'], opt['WMMA_N']), bdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_B, transient = True)
         nsdfg.add_array('acctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+        atile = nstate.add_access('atile')
+        btile = nstate.add_access('btile')
         acctile = nstate.add_access('acctile')
         acctile.setzero = True
 
@@ -1170,46 +1180,23 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, 0:{SK}'.format_map(opt)))
         nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt)))
 
-        # Creating wmma tasklet
+        ##############################
+        # Creating tasklet for computing the Tensor Core accumulated matrix multiplication
         wmma_tasklet = nstate.add_tasklet('wmma', None, None, "wmma::mma_sync(accfrag, afrag, bfrag, accfrag);", language=dace.dtypes.Language.CPP)
         wmma_tasklet.add_in_connector('afrag')
         wmma_tasklet.add_in_connector('bfrag')
         wmma_tasklet.add_out_connector('accfrag')
         nstate.add_edge(atile, None, wmma_tasklet, 'afrag', dace.Memlet(data="atile", subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
         nstate.add_edge(btile, None, wmma_tasklet, 'bfrag', dace.Memlet(data="btile", subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
-        nstate.add_edge(wmma_tasklet, 'accfrag', k_map_exit, 'IN__accfrag', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+        nstate.add_edge(wmma_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         
         ##############################
-        # Cleanup code for rest of gemm
-        # C = alpha * (A @ B) + beta * C
-        cleanup_code = True if alpha != 1.0 or beta != 0.0 else False
-        if(cleanup_code):
-            # Creating tasklet, computing the rest of the gemm definition
-            opt["beta_code"] = " + {beta} * cfrag.x[l]".format_map(opt) if beta != 0.0 else ""
-            code = '''#pragma unroll
-for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
-    accfrag.x[l] = {alpha} * accfragin.x[l]{beta_code};
-}}'''.format_map(opt)
-
-            comp_tasklet = nstate.add_tasklet('comp', None, None, code, language=dace.dtypes.Language.CPP)
-            comp_tasklet.add_in_connector('accfragin')
-            comp_tasklet.add_out_connector('accfrag')
-            k_map_exit.add_in_connector('IN__accfrag')
-            k_map_exit.add_out_connector('OUT__accfrag')
-            #nstate.add_edge(acctile, None, k_map_exit, 'IN__accfrag', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            nstate.add_edge(k_map_exit, 'OUT__accfrag', comp_tasklet, 'accfragin', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            
-            if beta != 0.0:
-                # Adding a read of c if beta != 0.0
-                ctile = nstate.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
-                comp_tasklet.add_in_connector('cfrag')
-                nstate.add_edge(ctile, None, comp_tasklet, 'cfrag', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-        ##############################
-
-        ##############################
         # If buffers are not on the GPU, copy them
+        copy_descs = [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]
+        if beta != 0.0:
+            copy_descs.append(('_cin', cindesc))
         if needs_copy:
-            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
+            for name, desc in copy_descs:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
                 else:
@@ -1231,26 +1218,15 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             # Adding memlets, connecting everything together
             nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
             nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
-            nstate.add_memlet_path(ga, map_entry, warp_map_entry, k_map_entry, ashared, atile, memlet=dace.Memlet(data="_a_gpu", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
-            nstate.add_memlet_path(gb, map_entry, warp_map_entry, k_map_entry, bshared, btile, memlet=dace.Memlet(data="_b_gpu", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
-
-            if cleanup_code:
-                if node.beta != 0.0:
-                    rc = nstate.add_read('_c')
-                    grc = nstate.add_access('_c_gpu')
-                    nstate.add_nedge(rc, grc, dace.Memlet.from_array('_c', bdesc))
-                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, ctile, memlet=dace.Memlet(data="_c_gpu", subset='i:i + {SM}, j:j + {SN}'.format_map(opt), other_subset='0:{SM}, 0:{SN}'.format_map(opt)))
-                #nstate.add_edge(k_map_exit, 'OUT__accfrag', comp_tasklet, 'accfragin', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-                nstate.add_edge(comp_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            else:    
-                nstate.add_edge(k_map_exit, 'OUT__accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            
-            nstate.add_memlet_path(acctile, warp_map_exit, map_exit, gc, memlet=dace.Memlet(data="_c_gpu", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
+            nstate.add_memlet_path(ga, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a_gpu", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
+            nstate.add_memlet_path(gb, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b_gpu", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, gc, memlet=dace.Memlet(data="_c_gpu", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
                                                                                                                               'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
             nstate.add_nedge(gc, c, dace.Memlet.from_array('_c', cdesc))
+
         else:
             # Arrays already on GPU
-            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
+            for name, desc in copy_descs:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
                 else:
@@ -1265,21 +1241,79 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             # Adding memlets, connecting everything together
             nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
             nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
-            if cleanup_code:
-                if node.beta != 0.0:
-                    rc = nstate.add_read('_c')
-                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, ctile, memlet=dace.Memlet(data="_c", subset='i:i + {SM}, j:j + {SN}'.format_map(opt), other_subset='0:{SM}, 0:{SN}'.format_map(opt)))
-                #nstate.add_edge(k_map_exit, 'OUT__accfrag', comp_tasklet, 'accfragin', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-                nstate.add_edge(comp_tasklet, 'accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            else:    
-                nstate.add_edge(k_map_exit, 'OUT__accfrag', acctile, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            
-            nstate.add_memlet_path(acctile, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
-                                                                                                                              'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
+                                                                                                                         'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
 
-        ##############################
-        # Adding Double Buffering to a and b, shared GPU containers
         DoubleBuffering.apply_to(nsdfg, map_entry=k_map_entry, transient=ashared)
+        for st, _ in nsdfg.all_nodes_recursive():
+            if isinstance(st, SDFGState) and st.label == f'{k_map_entry.label}_double_buffered':
+                for n in st.nodes():
+                    if isinstance(n, dace.sdfg.nodes.AccessNode) and n.data == 'acctile':
+                        for e in st.out_edges(n):
+                            st.remove_node(e.dst)
+                            # st.remove_edge(e)
+                        break
+                break
+        
+        ##############################
+        # Cleanup code for rest of gemm
+        # C = alpha * (A @ B) + beta * C
+        cleanup_code = True if alpha != 1.0 or beta != 0.0 else False
+        if(cleanup_code):
+            # Computing the rest of the gemm definition
+            opt["beta_code"] = " + {beta} * cfrag.x[l]".format_map(opt) if beta != 0.0 else ""
+            code = '''#pragma unroll
+for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
+    accfrag.x[l] = {alpha} * accfragin.x[l]{beta_code};
+}}'''.format_map(opt)
+
+            # Finding nodes in SDFG to use for adding the final computation
+            for st, _ in nsdfg.all_nodes_recursive():
+                if isinstance(st, dace.sdfg.nodes.NestedSDFG):
+                    nested_sdfg = st
+                    break
+            
+            for st, _ in nsdfg.all_nodes_recursive():
+                if isinstance(st, SDFGState) and st.label == f'{k_map_entry.label}_final_computation':
+                    final_state = st
+                    for n in st.nodes():
+                        if isinstance(n, dace.sdfg.nodes.AccessNode) and n.data == 'acctile':
+                            for e in st.out_edges(n):
+                                acctile_wmma = n
+                                cwrite = e.dst
+                                st.remove_edge(e)
+                            break
+                    break
+
+            # Creating final computation tasklet
+            comp_tasklet = final_state.add_tasklet('comp', None, None, code, language=dace.dtypes.Language.CPP)
+            comp_tasklet.add_in_connector('accfragin')
+            comp_tasklet.add_out_connector('accfrag')
+
+            # Connect with wmma tasklet in final state in k-loop
+            acctile_res = final_state.add_access('acctile')
+            final_state.add_edge(acctile_wmma, None, comp_tasklet, 'accfragin', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            final_state.add_edge(comp_tasklet, 'accfrag', acctile_res, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            final_state.add_edge(acctile_res, None, cwrite, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+
+            if beta != 0.0:
+                # Adding read of C and feeding into final computation tasklet
+                nested_sdfg.add_in_connector('_cin')
+                rc = nstate.add_access('_cin')
+                if needs_copy:
+                    grc = nstate.add_access('_cin_gpu')
+                    nstate.add_nedge(rc, grc, dace.Memlet.from_array('_cin', cdesc))
+                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin_gpu", subset='i:i+{SM}, j:j+{SN}'.format_map(opt),other_subset='0:{SM}, 0:{SN}'.format_map(opt)), dst_conn='_cin')
+                else:
+                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='i:i+{SM}, j:j+{SN}'.format_map(opt),other_subset='0:{SM}, 0:{SN}'.format_map(opt)), dst_conn='_cin')
+
+                # Note state.add_array is deprecated, try NestedSDFG.sdfg.add_array and then state.add_access
+                cin = final_state.add_array('_cin', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Global, transient = False)
+                ctile = final_state.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cdesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+                final_state.add_edge(cin, None, ctile, None, dace.Memlet(data="_cin", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt)))
+                comp_tasklet.add_in_connector('cfrag')
+                final_state.add_edge(ctile, None, comp_tasklet, 'cfrag', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))       
+        ##############################
         
         return nsdfg
 
@@ -1474,7 +1508,7 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             dcopy.storage = dace.StorageType.GPU_Global
             ksdfg.add_datadesc(name, dcopy)
 
-        nksdfg_in_conn = {'_a', '_b', '_c'} if beta != 0.0 else {'_a', '_b'} # TODO change to _cin, use node.in_connectors
+        nksdfg_in_conn = {'_a', '_b', '_c'} if beta != 0 else {'_a', '_b'} # TODO change to _cin, use node.in_connectors
         nksdfg = nstate.add_nested_sdfg(ksdfg, nstate, nksdfg_in_conn, node.out_connectors, name='kernel_gemm_nsdfg')
         
         # Add connectors between GPU map and warp map
