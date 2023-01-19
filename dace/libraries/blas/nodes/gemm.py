@@ -1303,9 +1303,9 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
                 if needs_copy:
                     grc = nstate.add_access('_cin_gpu')
                     nstate.add_nedge(rc, grc, dace.Memlet.from_array('_cin', cdesc))
-                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin_gpu", subset='i:i+{SM}, j:j+{SN}'.format_map(opt),other_subset='0:{SM}, 0:{SN}'.format_map(opt)), dst_conn='_cin')
+                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin_gpu", subset='i:i+{SM}, j:j+{SN}'.format_map(opt)), dst_conn='_cin')
                 else:
-                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='i:i+{SM}, j:j+{SN}'.format_map(opt),other_subset='0:{SM}, 0:{SN}'.format_map(opt)), dst_conn='_cin')
+                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='i:i+{SM}, j:j+{SN}'.format_map(opt)), dst_conn='_cin')
 
                 # Note state.add_array is deprecated, try NestedSDFG.sdfg.add_array and then state.add_access
                 nested_sdfg.sdfg.add_array('_cin', (opt['SM'], opt['SN']), cindesc.dtype, storage=dtypes.StorageType.GPU_Global, transient = False, strides = cindesc.strides, total_size=cindesc.total_size)
