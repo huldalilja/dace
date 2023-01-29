@@ -1255,6 +1255,15 @@ class ExpandGemmTensorCore3(ExpandTransformation):
                         break
                 break
         
+        # TODO hhannesdo temp solution to fix bug when expansion used inside batched mm
+        # remove extra dimension on offset and strides, need to find where in codegen is added to fix
+        for desc in nsdfg.arrays_recursive():
+            datadesc = desc[2]
+            if (len(datadesc.offset) != len(datadesc.shape)):
+                diff = len(datadesc.offset) - len(datadesc.shape)
+                datadesc.offset = datadesc.offset[diff:]
+                datadesc.strides = datadesc.strides[diff:]
+        
         ##############################
         # Cleanup code for rest of gemm
         # C = alpha * (A @ B) + beta * C
@@ -1307,12 +1316,11 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
                 else:
                     nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='i:i+{SM}, j:j+{SN}'.format_map(opt)), dst_conn='_cin')
 
-                # Note state.add_array is deprecated, try NestedSDFG.sdfg.add_array and then state.add_access
                 nested_sdfg.sdfg.add_array('_cin', (opt['SM'], opt['SN']), cindesc.dtype, storage=dtypes.StorageType.GPU_Global, transient = False, strides = cindesc.strides, total_size=cindesc.total_size)
                 cin = final_state.add_access('_cin')
 
-                # TODO try adding array to sdfg and add_access after
-                ctile = final_state.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cindesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+                nested_sdfg.sdfg.add_array('ctile', (opt['WMMA_M'], opt['WMMA_N']), cindesc.dtype, storage=dtypes.StorageType.GPU_TensorCore_Accumulator, transient = True)
+                ctile = final_state.add_access('ctile')
                 final_state.add_edge(cin, None, ctile, None, dace.Memlet(data="_cin", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt)))
                 comp_tasklet.add_in_connector('cfrag')
                 final_state.add_edge(ctile, None, comp_tasklet, 'cfrag', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))       

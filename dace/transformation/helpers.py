@@ -482,6 +482,9 @@ def nest_state_subgraph(sdfg: SDFG,
             datadesc.transient = False
             if not full_data:
                 datadesc.shape = edge.data.subset.size()
+                # hhannesdo TODO need to adapt to general case
+                datadesc.offset = datadesc.offset[1:]
+                datadesc.strides = datadesc.strides[1:]
             new_name = nsdfg.add_datadesc(name, datadesc, find_new_name=True)
             global_subsets[name] = (new_name, edge.data.subset)
         else:
@@ -502,6 +505,9 @@ def nest_state_subgraph(sdfg: SDFG,
             datadesc.transient = False
             if not full_data:
                 datadesc.shape = edge.data.subset.size()
+                # hhannesdo TODO need to adapt to general case
+                #datadesc.offset = datadesc.offset[1:]
+                #datadesc.strides = datadesc.strides[1:]
             new_name = nsdfg.add_datadesc(name, datadesc, find_new_name=True)
             global_subsets[name] = (new_name, edge.data.subset)
         else:
