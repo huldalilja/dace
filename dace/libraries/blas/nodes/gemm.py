@@ -1259,7 +1259,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # remove extra dimension on offset and strides, need to find where in codegen is added to fix
         for desc in nsdfg.arrays_recursive():
             datadesc = desc[2]
-            if (len(datadesc.offset) != len(datadesc.shape)):
+            if (len(datadesc.offset) > len(datadesc.shape)):
                 diff = len(datadesc.offset) - len(datadesc.shape)
                 datadesc.offset = datadesc.offset[diff:]
                 datadesc.strides = datadesc.strides[diff:]
