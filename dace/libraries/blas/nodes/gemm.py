@@ -1255,8 +1255,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
                         break
                 break
         
-        # TODO hhannesdo temp solution to fix bug when expansion used inside batched mm
-        # remove extra dimension on offset and strides, need to find where in codegen is added to fix
+        # Remove extra dimension on offset and strides if needed
         for desc in nsdfg.arrays_recursive():
             datadesc = desc[2]
             if (len(datadesc.offset) > len(datadesc.shape)):
