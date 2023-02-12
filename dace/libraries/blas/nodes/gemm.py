@@ -1255,7 +1255,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
                         break
                 break
         
-        # Remove extra dimension on offset and strides if needed
+        # Remove extra dimension on offset and strides if needed (added for batched mm)
         for desc in nsdfg.arrays_recursive():
             datadesc = desc[2]
             if (len(datadesc.offset) > len(datadesc.shape)):
@@ -1350,6 +1350,10 @@ class ExpandGemmTensorCore(ExpandTransformation):
                 bnode = state.memlet_path(e)[0].src
                 if isinstance(bnode, dace.sdfg.nodes.AccessNode):
                     bdesc: dt.Array = sdfg.arrays[bnode.data]
+            elif e.dst_conn == '_cin':
+                cinnode = state.memlet_path(e)[0].src
+                if isinstance(cinnode, dace.sdfg.nodes.AccessNode):
+                    cindesc: dt.Array = sdfg.arrays[cinnode.data]
         for e in state.out_edges(node):
             if e.src_conn == '_c':
                 cnode = state.memlet_path(e)[-1].dst
@@ -1532,17 +1536,20 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
         nstate.add_edge(nksdfg, '_c', warp_map_exit, 'IN' + arr_prefix + '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
         
         if node.beta != 0.0:
-            rc = nstate.add_read('_c')
+            rc = nstate.add_read('_cin')
             map_entry.add_in_connector('IN_c')
             map_entry.add_out_connector('OUT_c')
             warp_map_entry.add_in_connector('IN' + arr_prefix + '_c')
             warp_map_entry.add_out_connector('OUT' + arr_prefix + '_c')
-            nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, 'IN' + arr_prefix + '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
-            nstate.add_edge(warp_map_entry, 'OUT' + arr_prefix + '_c', nksdfg, '_c', dace.Memlet(data="_c" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+            nstate.add_edge(map_entry, 'OUT_c', warp_map_entry, 'IN' + arr_prefix + '_c', dace.Memlet(data="_cin" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
+            nstate.add_edge(warp_map_entry, 'OUT' + arr_prefix + '_c', nksdfg, '_c', dace.Memlet(data="_cin" + arr_suffix, subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
 
+        copy_descs = [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]
+        if beta != 0.0:
+            copy_descs.append(('_cin', cindesc))
         if needs_copy:
             # If buffers are not on the GPU, copy them
-            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
+            for name, desc in copy_descs:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
                 else:
@@ -1572,11 +1579,11 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
 
             if node.beta != 0.0:
                 rgc = nstate.add_access('_c_gpu')
-                nstate.add_nedge(rc, rgc, dace.Memlet('_c'))
+                nstate.add_nedge(rc, rgc, dace.Memlet('_cin'))
                 nstate.add_edge(rgc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c_gpu', cdesc))
         else:
             # Arrays already on GPU
-            for name, desc in [('_a', adesc), ('_b', bdesc), ('_c', cdesc)]:
+            for name, desc in copy_descs:
                 if isinstance(desc, dt.View):
                     dcopy = desc.as_array()
                 else:
@@ -1593,7 +1600,7 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             nstate.add_edge(map_exit, 'OUT_c', c, None, dace.Memlet.from_array('_c', cdesc))
 
             if node.beta != 0.0:
-                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_c', cdesc))
+                nstate.add_edge(rc, None, map_entry, 'IN_c', dace.Memlet.from_array('_cin', cdesc))
         ##### Optimization tests #####
         # xfutil.tile(nsdfg, map_entry, True, False, i=256, j=256)
         
