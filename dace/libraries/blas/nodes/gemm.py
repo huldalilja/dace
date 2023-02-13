@@ -1159,7 +1159,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # Adding shared memory of sizes SM*SK for a and SK*SN for b
         # Each warp(WM*WN warps) then computes a WMMA_M * WMMA_N of the output, in accumulation, while readong from shared memory accordingly  
         nsdfg.add_array('shared_a', (opt['SM'], f"({opt['SK']} + {opt['SSKEW']})"), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
-        nsdfg.add_array('shared_b', (opt['SK'], f"({opt['SN']} + {opt['SSKEW']})"), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
+        nsdfg.add_array('shared_b', (f"({opt['SN']} + {opt['SSKEW']})", opt['SK']), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
@@ -1178,7 +1178,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         ##############################
         # Moving data from shared memory to Tensor Core tiles
         nstate.add_edge(ashared, None, atile, None, dace.Memlet(data="shared_a", subset='tIdy*{WMMA_M}:tIdy*{WMMA_M}+{WMMA_M}, 0:{SK}'.format_map(opt)))
-        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='0:{SK},tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}'.format_map(opt)))
+        nstate.add_edge(bshared, None, btile, None, dace.Memlet(data="shared_b", subset='tIdz*{WMMA_N}:tIdz*{WMMA_N}+{WMMA_N}, 0:{SK}'.format_map(opt)))
 
         ##############################
         # Creating tasklet for computing the Tensor Core accumulated matrix multiplication
@@ -1240,7 +1240,7 @@ class ExpandGemmTensorCore3(ExpandTransformation):
 
             # Adding memlets, connecting everything together
             nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, ashared, memlet=dace.Memlet(data="_a", subset='i:i + {SM}, k:k + {SK}'.format_map(opt), other_subset='0:{SM}, 0:{SK}'.format_map(opt)))
-            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='k:k + {SK}, j:j + {SN}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
+            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, bshared, memlet=dace.Memlet(data="_b", subset='j:j + {SN}, k:k + {SK}'.format_map(opt), other_subset='0:{SK}, 0:{SN}'.format_map(opt)))
             nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i + tIdy*{WMMA_M}:i + tIdy*{WMMA_M} + {WMMA_M}, '
                                                                                                                          'j + tIdz*{WMMA_N}:j + tIdz*{WMMA_N} + {WMMA_N}'.format_map(opt)))
 

@@ -613,6 +613,9 @@ void __dace_exit_cuda({sdfg.name}_t *__state) {{
             if nodedesc.start_offset != 0:
                 raise NotImplementedError('Start offset unsupported for Tensor Core fragment memory')
             maj = 'row' if nodedesc.strides[-1] == 1 else 'col'
+            # TODO hhannesdo remove after testing
+            if fragment_type == 'b':
+                maj = 'col'
             if nodedesc.dtype != dace.float16:
                 raise NotImplementedError('Tensor Core Matrix Fragments have to be of the type float16')
             result_decl.write("wmma::fragment<wmma::matrix_%s, WMMA_M, WMMA_N, WMMA_K, half, wmma::%s_major> %s;\n" % (fragment_type, maj, dataname))
