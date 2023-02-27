@@ -1080,6 +1080,8 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             opt['arr_prefix'] = arr_prefix = '_conn'
             arr_suffix = '_gpu'
         
+        # Swap is true if matrices are row-major to simplify other expansions.
+        # This expansion assumes matrices to be row-major so undo swap related opts.
         if opt['swap']:
             opt_M = opt['M']
             opt['M'] = opt['N']
@@ -1089,7 +1091,9 @@ class ExpandGemmTensorCore3(ExpandTransformation):
             opt['ldb'] = opt_lda
             opt['major_order'] = 'row'
         else:
-            # TODO hhannesdo, haven't tested. Might need to make changes in maps too.
+            # TODO hhannesdo finish and test.
+            # Matrices are col-major. Since this expansion assumes row-maj need to
+            # do the swap in this case.
             opt['lda'] = 'M'
             opt['ldb'] = 'K'
             opt['ldc'] = 'M'
@@ -1163,7 +1167,6 @@ class ExpandGemmTensorCore3(ExpandTransformation):
         # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
-        # c_shared_out = nstate.add_access('shared_c')
 
         ##############################
         # Adding Tensor Core arrays
