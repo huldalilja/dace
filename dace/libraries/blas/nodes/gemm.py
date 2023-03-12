@@ -697,7 +697,8 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
             acctile_res = final_state.add_access('acctile')
             final_state.add_edge(acctile_wmma, None, comp_tasklet, 'accfragin', dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
             final_state.add_edge(comp_tasklet, 'accfrag', acctile_res, None, dace.Memlet(data="acctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
-            final_state.add_edge(acctile_res, None, cwrite, None, dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            cwritename = '_c_gpu' if needs_copy else '_c' 
+            final_state.add_edge(acctile_res, None, cwrite, None, dace.Memlet(data=cwritename, subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
 
             if beta != 0.0:
                 # Adding read of C and feeding into final computation tasklet
