@@ -505,7 +505,7 @@ class ExpandGemmTensorCore(ExpandTransformation):
         ##############################
         # Creating nested SDFG
         sdfg.add_constant('WM', 4)
-        sdfg.add_constant('WN', 4)
+        sdfg.add_constant('WN', 8)
         sdfg.add_constant('SSKEW', 8)
         nsdfg = dace.SDFG('nested_gemm')
         global_code = '''
