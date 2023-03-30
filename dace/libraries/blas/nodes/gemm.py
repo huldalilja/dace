@@ -739,7 +739,7 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
 
         node.validate(sdfg, state)
 
-                ##############################
+        ##############################
         # Find inputs and output
         adesc, bdesc, cdesc = None, None, None
         for e in state.in_edges(node):
@@ -905,9 +905,9 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
             # Adding memlets, connecting everything together
             nstate.add_nedge(a, ga, dace.Memlet.from_array('_a', adesc))
             nstate.add_nedge(b, gb, dace.Memlet.from_array('_b', bdesc))
-            nstate.add_memlet_path(ga, map_entry, warp_map_entry, k_map_entry, atile, memlet=dace.Memlet(data="_a_gpu", subset='0:{WMMA_M}, k:k + {WMMA_K}'.format_map(opt), other_subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
-            nstate.add_memlet_path(gb, map_entry, warp_map_entry, k_map_entry, btile, memlet=dace.Memlet(data="_b_gpu", subset='k:k + {WMMA_K}, 0:{WMMA_N}'.format_map(opt), other_subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
-            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, gc, memlet=dace.Memlet(data="_c_gpu", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            nstate.add_memlet_path(ga, map_entry, warp_map_entry, k_map_entry, atile, memlet=dace.Memlet(data="_a_gpu", subset='i:i+{WMMA_M}, k:k + {WMMA_K}'.format_map(opt), other_subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
+            nstate.add_memlet_path(gb, map_entry, warp_map_entry, k_map_entry, btile, memlet=dace.Memlet(data="_b_gpu", subset='k:k + {WMMA_K}, j:j+{WMMA_N}'.format_map(opt), other_subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, gc, memlet=dace.Memlet(data="_c_gpu", subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
             nstate.add_nedge(gc, c, dace.Memlet.from_array('_c', cdesc))
 
         else:
@@ -925,9 +925,9 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
             c = nstate.add_access('_c')
 
             # Adding memlets, connecting everything together
-            nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, atile, memlet=dace.Memlet(data="_a", subset='0:{WMMA_M}, k:k + {WMMA_K}'.format_map(opt), other_subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
-            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, btile, memlet=dace.Memlet(data="_b", subset='k:k + {WMMA_K}, 0:{WMMA_N}'.format_map(opt), other_subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
-            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
+            nstate.add_memlet_path(a, map_entry, warp_map_entry, k_map_entry, atile, memlet=dace.Memlet(data="_a", subset='i:i+{WMMA_M}, k:k + {WMMA_K}'.format_map(opt), other_subset='0:{WMMA_M}, 0:{WMMA_K}'.format_map(opt)))
+            nstate.add_memlet_path(b, map_entry, warp_map_entry, k_map_entry, btile, memlet=dace.Memlet(data="_b", subset='k:k + {WMMA_K}, j:j+{WMMA_N}'.format_map(opt), other_subset='0:{WMMA_K}, 0:{WMMA_N}'.format_map(opt)))
+            nstate.add_memlet_path(acctile, k_map_exit, warp_map_exit, map_exit, c, memlet=dace.Memlet(data="_c", subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)))
 
         MapToForLoop.apply_to(nsdfg, map_entry = k_map_entry)
         
@@ -994,9 +994,9 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
                 if needs_copy:
                     grc = nstate.add_access('_cin_gpu')
                     nstate.add_nedge(rc, grc, dace.Memlet.from_array('_cin', cdesc))
-                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin_gpu", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)), dst_conn='_cin')
+                    nstate.add_memlet_path(grc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin_gpu", subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)), dst_conn='_cin')
                 else:
-                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)), dst_conn='_cin')
+                    nstate.add_memlet_path(rc, map_entry, warp_map_entry, nested_sdfg, memlet=dace.Memlet(data="_cin", subset='i:i+{WMMA_M}, j:j+{WMMA_N}'.format_map(opt)), dst_conn='_cin')
 
                 nested_sdfg.sdfg.add_array('_cin', (opt['WMMA_M'], opt['WMMA_N']), cindesc.dtype, storage=dtypes.StorageType.GPU_Global, transient = False, strides = cindesc.strides, total_size=cindesc.total_size)
                 cin = final_state.add_access('_cin')
