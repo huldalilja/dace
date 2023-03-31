@@ -602,32 +602,39 @@ void __dace_exit_cuda({sdfg.name}_t *__state) {{
                                                                        ptr=dataname,
                                                                        elements=sym2cpp(arrsize)))
         elif nodedesc.storage in tensorcore_matrix_storage_types:
-            if arrsize != 16*16:
-                raise NotImplementedError("Tensor Core Fragments have to be of the size 16x16")
+            if nodedesc.dtype != dace.float16 and nodedesc.dtype != dace.float64:
+                raise NotImplementedError('Tensor Core Matrix Fragments have to be of the type float16 or float64')
             if nodedesc.storage == dtypes.StorageType.GPU_TensorCore_A:
                 fragment_type = 'a'
             else:
                 fragment_type = 'b'
+            if nodedesc.dtype == dace.float16 and arrsize != 16*16:
+                raise NotImplementedError("Tensor Core Fragments have to be of the size 16x16 for dace.float16 precision")
+            if fragment_type == 'a' and nodedesc.dtype == dace.float64 and arrsize != 8*4:
+                raise NotImplementedError("Tensor Core A Fragment has to be of the size 8x4 for dace.float64 precision")
+            if fragment_type == 'b' and nodedesc.dtype == dace.float64 and arrsize != 4*8:
+                raise NotImplementedError("Tensor Core A Fragment has to be of the size 4x8 for dace.float64 precision")
             if is_dynamically_sized:
                 raise NotImplementedError('Dynamic Tensor Core fragments unsupported')
             if nodedesc.start_offset != 0:
                 raise NotImplementedError('Start offset unsupported for Tensor Core fragment memory')
             maj = 'row' if nodedesc.strides[-1] == 1 else 'col'
-            if nodedesc.dtype != dace.float16:
-                raise NotImplementedError('Tensor Core Matrix Fragments have to be of the type float16')
-            result_decl.write("wmma::fragment<wmma::matrix_%s, WMMA_M, WMMA_N, WMMA_K, half, wmma::%s_major> %s;\n" % (fragment_type, maj, dataname))
+            ctype = "half" if nodedesc.dtype == dace.float16 else nodedesc.dtype.ctype
+            result_decl.write("wmma::fragment<wmma::matrix_%s, WMMA_M, WMMA_N, WMMA_K, %s, wmma::%s_major> %s;\n" % (fragment_type, ctype, maj, dataname))
             self._dispatcher.defined_vars.add(dataname, DefinedType.Pointer, ctypedef)
             if node.setzero:
                 raise NotImplementedError('setzero unsupported for Tensor Core fragment matrix memory')
         elif nodedesc.storage == dtypes.StorageType.GPU_TensorCore_Accumulator:
-            if arrsize != 16*16:
-                raise NotImplementedError("Tensor Core Fragments have to be of the size 16x16")
+            if nodedesc.dtype != dace.float16 and nodedesc.dtype != dace.float32 and nodedesc.dtype != dace.float64:
+                raise NotImplementedError('Tensor Core Accumulator Fragments have to be of the type float16, float32 or float64')
+            if (nodedesc.dtype == dace.float16 or nodedesc.dtype == dace.float32) and arrsize != 16*16:
+                raise NotImplementedError("Tensor Core Accumulator Fragments have to be of the size 16x16 for dace.float16 and float32 precisions")
+            if nodedesc.dtype == dace.float64 and arrsize != 8*8:
+                raise NotImplementedError("Tensor Core Fragments have to be of the size 8x8 for dace.float64 precision")
             if is_dynamically_sized:
                 raise NotImplementedError('Dynamic Tensor Core fragments unsupported')
             if nodedesc.start_offset != 0:
                 raise NotImplementedError('Start offset unsupported for Tensor Core fragment memory')
-            if nodedesc.dtype != dace.float16 and nodedesc.dtype != dace.float32:
-                raise NotImplementedError('Tensor Core Accumulator Fragments have to be of the type float16 or float32')
             ctype = "half" if nodedesc.dtype == dace.float16 else nodedesc.dtype.ctype
             result_decl.write("wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, %s> %s;\n" % (ctype, dataname))
             self._dispatcher.defined_vars.add(dataname, DefinedType.Pointer, ctypedef)

@@ -449,11 +449,12 @@ class ExpandGemmTensorCore(ExpandTransformation):
         adtype = adesc.dtype.base_type
         bdtype = bdesc.dtype.base_type
         cdtype = cdesc.dtype.base_type
-        # TODO, for later when using A100, can support higher precision
-        # Will need to change things in the codegen too
-        if adtype != dace.float16 or bdtype != dace.float16 or (cdtype != dace.float16 and cdtype != dace.float32):
-            # TODO convert, if possible or use different architecture like Nvidia A100
-            raise ValueError("Unsupported type: " + str(adtype))
+        all_half_precision = (adtype == dace.float16 and bdtype == dace.float16 and cdtype == dace.float16)
+        fp16_and_fp32 = (adtype == dace.float16 and bdtype == dace.float16 and cdtype == dace.float32)
+        all_double_precision = (adtype == dace.float64 and bdtype == dace.float64 and cdtype == dace.float64)
+        if not(all_half_precision or fp16_and_fp32 or all_double_precision):
+            # TODO add support for conversion if in configuration
+            raise ValueError("Unsupported type combination: {}, {} and {}".format(str(adtype), str(bdtype), str(cdtype)))
 
         alpha = node.alpha
         beta = node.beta
@@ -463,15 +464,9 @@ class ExpandGemmTensorCore(ExpandTransformation):
         dtype = adesc.dtype.base_type
         func = '%sgemm' % to_blastype(dtype.type)
         opt = _get_codegen_gemm_opts(node, state, sdfg, adesc, bdesc, cdesc, alpha, beta, cdtype, func)
-        opt['arr_prefix'] = arr_prefix = ''
-        opt['WMMA_M'] = node.WMMA_M
-        opt['WMMA_N'] = node.WMMA_N
-        opt['WMMA_K'] = node.WMMA_K
         opt['WARP_SIZE'] = node.WARP_SIZE
-        arr_suffix = ''
         if needs_copy:
             opt['arr_prefix'] = arr_prefix = '_conn'
-            arr_suffix = '_gpu'
         
         # Swap is true if matrices are row-major to simplify other expansions.
         # This expansion assumes matrices to be row-major so undo swap related opts.
@@ -493,7 +488,29 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['major_order'] = 'col'
         
         # Setting tiling and skewing parameters
-        # TODO hhannesdo find best values
+        if all_half_precision:
+            sdfg.add_constant('WM', 4)
+            sdfg.add_constant('WN', 8)
+            sdfg.add_constant('SSKEW', 8)
+            opt['WMMA_M'] = 16
+            opt['WMMA_N'] = 16
+            opt['WMMA_K'] = 16
+        if all_double_precision:
+            sdfg.add_constant('WM', 4)
+            sdfg.add_constant('WN', 8)
+            sdfg.add_constant('SSKEW', 8)
+            opt['WMMA_M'] = 8
+            opt['WMMA_N'] = 8
+            opt['WMMA_K'] = 4
+        else:
+            # Default case optimized for mixed precision for FP16 and FP32 on an architecture with 64B Shared GPU Memory.
+            sdfg.add_constant('WM', 4)
+            sdfg.add_constant('WN', 8)
+            sdfg.add_constant('SSKEW', 8)
+            opt['WMMA_M'] = 16
+            opt['WMMA_N'] = 16
+            opt['WMMA_K'] = 16
+        
         opt['WM'] = 'WM'
         opt['WN'] = 'WN'
         
@@ -505,9 +522,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
 
         ##############################
         # Creating nested SDFG
-        sdfg.add_constant('WM', 4)
-        sdfg.add_constant('WN', 8)
-        sdfg.add_constant('SSKEW', 8)
         nsdfg = dace.SDFG('nested_gemm')
         global_code = '''
     #ifdef __CUDACC__
@@ -557,7 +571,6 @@ class ExpandGemmTensorCore(ExpandTransformation):
         # Each warp(WM*WN warps) then computes a WMMA_M * WMMA_N of the output, in accumulation, while readong from shared memory accordingly  
         nsdfg.add_array('shared_a', (opt['SM'], f"({opt['SK']} + {opt['SSKEW']})"), adesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         nsdfg.add_array('shared_b', (opt['SK'], f"({opt['SN']} + {opt['SSKEW']})"), bdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
-        # nsdfg.add_array('shared_c', (opt['SM'], opt['SN']), cdesc.dtype, storage=dtypes.StorageType.GPU_Shared, transient = True)
         ashared = nstate.add_access('shared_a')
         bshared = nstate.add_access('shared_b')
 
@@ -733,7 +746,6 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
 
     @staticmethod
     def expansion(node, state, sdfg):
-        print("Plain Tensor Core Expansion")
         # Import here to avoid circular dependency
         from dace.transformation.dataflow.map_for_loop import MapToForLoop
 
@@ -770,11 +782,12 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
         adtype = adesc.dtype.base_type
         bdtype = bdesc.dtype.base_type
         cdtype = cdesc.dtype.base_type
-        # TODO, for later when using A100, can support higher precision
-        # Will need to change things in the codegen too
-        if adtype != dace.float16 or bdtype != dace.float16 or (cdtype != dace.float16 and cdtype != dace.float32):
-            # TODO convert, if possible or use different architecture like Nvidia A100
-            raise ValueError("Unsupported type: " + str(adtype))
+        all_half_precision = (adtype == dace.float16 and bdtype == dace.float16 and cdtype == dace.float16)
+        fp16_and_fp32 = (adtype == dace.float16 and bdtype == dace.float16 and cdtype == dace.float32)
+        all_double_precision = (adtype == dace.float64 and bdtype == dace.float64 and cdtype == dace.float64)
+        if not(all_half_precision or fp16_and_fp32 or all_double_precision):
+            # TODO add support for conversion if in configuration
+            raise ValueError("Unsupported type combination: {}, {} and {}".format(str(adtype), str(bdtype), str(cdtype)))
 
         alpha = node.alpha
         beta = node.beta
@@ -784,15 +797,9 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
         dtype = adesc.dtype.base_type
         func = '%sgemm' % to_blastype(dtype.type)
         opt = _get_codegen_gemm_opts(node, state, sdfg, adesc, bdesc, cdesc, alpha, beta, cdtype, func)
-        opt['arr_prefix'] = arr_prefix = ''
-        opt['WMMA_M'] = node.WMMA_M
-        opt['WMMA_N'] = node.WMMA_N
-        opt['WMMA_K'] = node.WMMA_K
         opt['WARP_SIZE'] = node.WARP_SIZE
-        arr_suffix = ''
         if needs_copy:
             opt['arr_prefix'] = arr_prefix = '_conn'
-            arr_suffix = '_gpu'
         
         # Swap is true if matrices are row-major to simplify other expansions.
         # This expansion assumes matrices to be row-major so undo swap related opts.
@@ -812,6 +819,21 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
             opt['ldb'] = 'K'
             opt['ldc'] = 'M'
             opt['major_order'] = 'col'
+        
+        # Setting tiling and skewing parameters
+        if all_half_precision:
+            opt['WMMA_M'] = 16
+            opt['WMMA_N'] = 16
+            opt['WMMA_K'] = 16
+        if all_double_precision:
+            opt['WMMA_M'] = 8
+            opt['WMMA_N'] = 8
+            opt['WMMA_K'] = 4
+        else:
+            # Default case optimized for mixed precision for FP16 and FP32 on an architecture with 64B Shared GPU Memory.
+            opt['WMMA_M'] = 16
+            opt['WMMA_N'] = 16
+            opt['WMMA_K'] = 16
 
         ##############################
         # Creating nested SDFG
@@ -950,6 +972,16 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
                 datadesc.offset = datadesc.offset[diff:]
                 datadesc.strides = datadesc.strides[diff:]
         
+        # Finding nodes in SDFG to use for adding the final computation
+        for st, _ in nsdfg.all_nodes_recursive():
+            if isinstance(st, dace.sdfg.nodes.NestedSDFG):
+                nested_sdfg = st
+                break
+        
+        for st, _ in nested_sdfg.sdfg.all_nodes_recursive():
+            if isinstance(st, SDFGState) and st.label == 'state_1':
+                final_state = st
+
         ##############################
         # Cleanup code for rest of gemm
         # C = alpha * (A @ B) + beta * C
@@ -961,16 +993,6 @@ class ExpandGemmTensorCorePlain(ExpandTransformation):
 for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
     accfrag.x[l] = {alpha} * accfragin.x[l]{beta_code};
 }}'''.format_map(opt)
-
-            # Finding nodes in SDFG to use for adding the final computation
-            for st, _ in nsdfg.all_nodes_recursive():
-                if isinstance(st, dace.sdfg.nodes.NestedSDFG):
-                    nested_sdfg = st
-                    break
-            
-            for st, _ in nested_sdfg.sdfg.all_nodes_recursive():
-                if isinstance(st, SDFGState) and st.label == 'state_1':
-                    final_state = st
 
             cwrite = final_state.add_access('_c')
             acctile_wmma = final_state.add_access('acctile')
@@ -1006,6 +1028,11 @@ for(int l = 0; l < {WMMA_M}*{WMMA_N}; l++){{
                 final_state.add_edge(cin, None, ctile, None, dace.Memlet(data="_cin", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
                 comp_tasklet.add_in_connector('cfrag')
                 final_state.add_edge(ctile, None, comp_tasklet, 'cfrag', dace.Memlet(data="ctile", subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))       
+        else:
+            acctile_res = final_state.add_access('acctile')
+            cwritename = '_c_gpu' if needs_copy else '_c' 
+            cwrite = final_state.add_access(cwritename)
+            final_state.add_edge(acctile_res, None, cwrite, None, dace.Memlet(data=cwritename, subset='0:{WMMA_M}, 0:{WMMA_N}'.format_map(opt)))
         ##############################
         
         return nsdfg
@@ -1532,9 +1559,6 @@ class Gemm(dace.sdfg.nodes.LibraryNode):
     default_implementation = None
 
     # Constants used in Tensor Core expansion
-    WMMA_M = 16
-    WMMA_N = 16
-    WMMA_K = 16
     WARP_SIZE = 32
 
     # Object fields
