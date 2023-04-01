@@ -497,8 +497,8 @@ class ExpandGemmTensorCore(ExpandTransformation):
             opt['WMMA_K'] = 16
         if all_double_precision:
             # Optimized for architecture with 132 or 164 KB shared memory per SM.
-            # TODO might possibly be higher
-            sdfg.add_constant('WM', 16)
+            # TODO might possibly be higher or the opposite use of 8 and 16
+            sdfg.add_constant('WM', 8)
             sdfg.add_constant('WN', 16)
             sdfg.add_constant('SSKEW', 8)
             opt['WMMA_M'] = 8

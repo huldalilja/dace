@@ -1129,8 +1129,9 @@ void __dace_alloc_{location}(uint32_t {size}, dace::GPUStream<{type}, {is_pow2}>
                     self._dispatcher, sdfg, state_dfg, edge, src_node, dst_node, self._cpu_codegen._packed_types))
 
                 dims = len(copy_shape)
-                if dims != 2 or copy_shape[0] != 16 or copy_shape[1] != 16:
-                    raise NotImplementedError('Only Tensor Core fragments of shape 16x16 are supported')
+                supported_shapes = [4, 8, 16]
+                if dims != 2 or copy_shape[0] not in supported_shapes or copy_shape[1] not in supported_shapes:
+                    raise NotImplementedError('Only Tensor Core fragments of shape 16x16, 8x4 or 4x8 are supported')
 
                 src_ctype = src_node.desc(sdfg).dtype.ctype
                 dst_ctype = dst_node.desc(sdfg).dtype.ctype
